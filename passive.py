@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -172,11 +173,13 @@ class PassiveMusicMemory:
     def _write_state(self, state: dict[str, Any]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.path.with_name(f".{self.path.name}.tmp")
-        temporary.write_text(
-            json.dumps(state, ensure_ascii=False, separators=(",", ":")),
-            encoding="utf-8",
-        )
+        with temporary.open("w", encoding="utf-8") as output:
+            if os.name != "nt":
+                os.chmod(temporary, 0o600)
+            output.write(json.dumps(state, ensure_ascii=False, separators=(",", ":")))
         temporary.replace(self.path)
+        if os.name != "nt":
+            os.chmod(self.path, 0o600)
 
 
 async def capture_current_scope(context: Any, umo: str) -> tuple[str, str] | None:

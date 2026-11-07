@@ -431,8 +431,13 @@ class EnvironmentManager:
                 else:
                     current["tool_urls"][tool_id] = value.strip()
         temporary = self.settings_path.with_suffix(".json.tmp")
-        temporary.write_text(json.dumps(current, ensure_ascii=False, indent=2), encoding="utf-8")
+        with temporary.open("w", encoding="utf-8") as output:
+            if os.name != "nt":
+                os.chmod(temporary, 0o600)
+            output.write(json.dumps(current, ensure_ascii=False, indent=2))
         temporary.replace(self.settings_path)
+        if os.name != "nt":
+            os.chmod(self.settings_path, 0o600)
         return current
 
     def _default_ffmpeg_url(self) -> str:

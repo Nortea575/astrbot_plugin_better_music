@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import json
 import filecmp
+import os
 import re
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .paths import is_path_link
+from .paths import data_subdirectory, is_path_link
 
 
 _SONG_ID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
@@ -39,15 +40,20 @@ class MusicStorage:
     """Store each managed song under downloads/<platform>/<safe-title>-<uuid>."""
 
     def __init__(self, data_dir: Path, downloads_dir: Path | None = None):
-        self.data_dir = Path(data_dir).expanduser().resolve()
-        self.downloads_dir = Path(downloads_dir or self.data_dir / "downloads").expanduser().absolute()
-        if is_path_link(self.downloads_dir):
-            raise ValueError("歌曲下载目录不能是符号链接或目录联接")
-        self.downloads_dir.mkdir(parents=True, exist_ok=True)
-        if is_path_link(self.downloads_dir):
-            raise ValueError("歌曲下载目录不能是符号链接或目录联接")
-        if not self.downloads_dir.is_dir():
-            raise ValueError("歌曲下载路径不是目录")
+        self.data_dir = Path(os.path.abspath(Path(data_dir).expanduser()))
+        data_subdirectory(self.data_dir)
+        requested_downloads = Path(
+            os.path.abspath(Path(downloads_dir).expanduser())
+            if downloads_dir is not None
+            else self.data_dir / "downloads"
+        )
+        try:
+            relative = requested_downloads.relative_to(self.data_dir)
+        except ValueError as exc:
+            raise ValueError("歌曲下载目录必须位于插件数据根目录内") from exc
+        if not relative.parts:
+            raise ValueError("歌曲下载目录必须是插件数据根目录下的子目录")
+        self.downloads_dir = data_subdirectory(self.data_dir, *relative.parts)
         # Kept as an alias for the runtime's pending-directory bookkeeping.
         self.songs_dir = self.downloads_dir
         self.legacy_songs_dir = self.data_dir / "songs"

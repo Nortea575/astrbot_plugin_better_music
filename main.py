@@ -11,13 +11,13 @@ from pathlib import Path
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.message_components import Record
-from astrbot.api.star import Context, Star, register
+from astrbot.api.star import Context, Star, StarTools, register
 from astrbot.api.event import MessageChain
 
 from .active import ActiveMusicController, build_active_tools
 from .providers import PLATFORMS, ProviderManager
 from .passive import PassiveMusicMemory, capture_current_scope, format_context
-from .paths import PLUGIN_NAME, plugin_data_dir, plugin_root_from_module, plugin_subdirectory
+from .paths import PLUGIN_NAME, data_subdirectory
 from .runtime import MusicRuntime
 from .song_log import send_song_log
 from .templates import (
@@ -51,7 +51,7 @@ def _wav_duration(path: Path) -> float | None:
     PLUGIN_NAME,
     "Xing",
     "更好的点歌：支持网易云音乐、QQ音乐和酷狗，并提供登录与文件管理页面。",
-    "1.0.0",
+    "1.0.1",
 )
 class BetterMusicPlugin(Star):
     """Search provider catalogs and send only an explicitly selected track."""
@@ -60,9 +60,8 @@ class BetterMusicPlugin(Star):
         super().__init__(context)
         self.context = context
         self.config = config or {}
-        self.plugin_root = plugin_root_from_module(__file__)
-        self.data_dir = plugin_data_dir(self.plugin_root)
-        self.downloads_dir = plugin_subdirectory(self.plugin_root, "downloads")
+        self.data_dir = data_subdirectory(StarTools.get_data_dir(PLUGIN_NAME))
+        self.downloads_dir = data_subdirectory(self.data_dir, "downloads")
         self.providers = ProviderManager(self.data_dir)
         self.runtime = MusicRuntime(
             self.data_dir,
