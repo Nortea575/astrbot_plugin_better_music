@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import re
 import time
-import wave
+from contextlib import aclosing
 from pathlib import Path
 
 from astrbot.api import logger
@@ -14,10 +14,12 @@ from astrbot.api.message_components import Record
 from astrbot.api.star import Context, Star, StarTools, register
 from astrbot.api.event import MessageChain
 
+from .audio import wav_duration as _wav_duration
 from .active import ActiveMusicController, build_active_tools
 from .providers import PLATFORMS, ProviderManager
 from .passive import PassiveMusicMemory, capture_current_scope, format_context
 from .paths import PLUGIN_NAME, data_subdirectory
+from .quota import CHECKER_FAILURE, MusicQuotaService, QuotaReservation, scope_from_event
 from .runtime import MusicRuntime
 from .song_log import send_song_log
 from .templates import (
@@ -38,20 +40,11 @@ CHAT_NAMES["kugou"] = "酷狗音乐"
 CHAT_NAMES["qq"] = "QQ音乐"
 
 
-def _wav_duration(path: Path) -> float | None:
-    try:
-        with wave.open(str(path), "rb") as audio:
-            rate = audio.getframerate()
-            return audio.getnframes() / rate if rate > 0 else None
-    except (OSError, EOFError, wave.Error):
-        return None
-
-
 @register(
     PLUGIN_NAME,
     "Xing",
     "更好的点歌：支持网易云音乐、QQ音乐和酷狗，并提供登录与文件管理页面。",
-    "1.0.1",
+    "1.1.0",
 )
 class BetterMusicPlugin(Star):
     """Search provider catalogs and send only an explicitly selected track."""
@@ -62,6 +55,12 @@ class BetterMusicPlugin(Star):
         self.config = config or {}
         self.data_dir = data_subdirectory(StarTools.get_data_dir(PLUGIN_NAME))
         self.downloads_dir = data_subdirectory(self.data_dir, "downloads")
+        self.music_quota = MusicQuotaService(
+            self.data_dir / "music_usage.json",
+            logger=logger,
+        )
+        self._balance_quota_peer = None
+        self._connect_balance_quota()
         self.providers = ProviderManager(self.data_dir)
         self.runtime = MusicRuntime(
             self.data_dir,
@@ -92,6 +91,64 @@ class BetterMusicPlugin(Star):
         await self.runtime.migrate_legacy()
         await self.runtime.cleanup()
         self.runtime.start_cleanup()
+
+    def get_music_quota_api(self) -> MusicQuotaService | None:
+        """Return the stable in-process quota bridge for another AstrBot plugin."""
+        return getattr(self, "music_quota", None)
+
+    def _balance_plugin(self):
+        getter = getattr(self.context, "get_registered_star", None)
+        if not callable(getter):
+            return None
+        try:
+            metadata = getter("astrbot_plugin_better_balance")
+        except Exception:
+            return None
+        return getattr(metadata, "star_cls", None)
+
+    def _connect_balance_quota(self) -> None:
+        """Offer the public quota API to an already loaded Balance plugin."""
+        api = self.get_music_quota_api()
+        balance = self._balance_plugin()
+        callback = getattr(balance, "on_music_quota_ready", None)
+        if api is None or not callable(callback):
+            return
+        try:
+            previous = getattr(self, "_balance_quota_peer", None)
+            if previous is not None and previous is not balance:
+                unavailable = getattr(previous, "on_music_quota_unavailable", None)
+                if callable(unavailable):
+                    unavailable(api)
+            callback(api)
+            self._balance_quota_peer = balance
+        except Exception:
+            logger.exception("连接 Better Balance 点歌额度失败。")
+
+    def _disconnect_balance_quota(self) -> None:
+        """Notify the current and previously connected Balance instances."""
+        api = self.get_music_quota_api()
+        if api is None:
+            return
+        current = self._balance_plugin()
+        previous = getattr(self, "_balance_quota_peer", None)
+        peers = []
+        for balance in (current, previous):
+            if balance is not None and not any(balance is peer for peer in peers):
+                peers.append(balance)
+        for balance in peers:
+            callback = getattr(balance, "on_music_quota_unavailable", None)
+            if not callable(callback):
+                continue
+            try:
+                callback(api)
+            except Exception:
+                logger.exception("通知 Better Balance 点歌额度接口卸载失败。")
+        self._balance_quota_peer = None
+
+    @filter.on_astrbot_loaded()
+    async def on_astrbot_loaded(self) -> None:
+        """Retry the one-time public handshake after plugin instances are registered."""
+        self._connect_balance_quota()
 
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def on_message(self, event: AstrMessageEvent) -> None:
@@ -177,7 +234,7 @@ class BetterMusicPlugin(Star):
                     })
                     if notice is not None:
                         await event.send(event.plain_result(notice))
-                async for response in self._download_and_send(
+                playback = self._download_and_send(
                     event,
                     candidate["platform"],
                     selection,
@@ -185,8 +242,10 @@ class BetterMusicPlugin(Star):
                     matched_prefix,
                     reply_enabled,
                     passive_enabled=settings.get("passive_llm", False) is True,
-                ):
-                    await event.send(response)
+                )
+                async with aclosing(playback):
+                    async for response in playback:
+                        await event.send(response)
         finally:
             event.stop_event()
 
@@ -415,6 +474,72 @@ class BetterMusicPlugin(Star):
         *,
         passive_enabled: bool = False,
     ):
+        reservation: QuotaReservation | None = None
+        quota_api = self.get_music_quota_api()
+        if quota_api is not None:
+            identity = self._selection_identity(event)
+            if identity is None:
+                yield event.plain_result(self._failure(
+                    templates,
+                    "播放",
+                    "无法识别当前用户和会话，未开始下载歌曲。",
+                    title=str(selection.get("title") or "未知歌曲"),
+                    wake_prefix=wake_prefix,
+                ))
+                return
+            try:
+                reservation, reason = await quota_api.reserve(
+                    identity[0],
+                    source="command",
+                    kind="original",
+                    actor_id=identity[1],
+                    scope=scope_from_event(event),
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("确认点歌额度失败，已停止本次播放。")
+                reservation, reason = None, CHECKER_FAILURE
+            if reservation is None:
+                yield event.plain_result(self._failure(
+                    templates,
+                    "播放",
+                    reason or CHECKER_FAILURE,
+                    title=str(selection.get("title") or "未知歌曲"),
+                    wake_prefix=wake_prefix,
+                ))
+                return
+
+        try:
+            playback = self._download_and_send_admitted(
+                event,
+                provider_id,
+                selection,
+                templates,
+                wake_prefix,
+                reply_enabled,
+                passive_enabled=passive_enabled,
+                reservation=reservation,
+            )
+            async with aclosing(playback):
+                async for response in playback:
+                    yield response
+        finally:
+            if reservation is not None:
+                await reservation.release()
+
+    async def _download_and_send_admitted(
+        self,
+        event,
+        provider_id: str,
+        selection: dict,
+        templates: dict[str, str],
+        wake_prefix: str,
+        reply_enabled: dict[str, bool],
+        *,
+        passive_enabled: bool = False,
+        reservation: QuotaReservation | None = None,
+    ):
         playback_started_at = time.time()
         umo = str(getattr(event, "unified_msg_origin", "") or "")
         title = str(selection.get("title") or "未知歌曲")
@@ -524,6 +649,13 @@ class BetterMusicPlugin(Star):
             sent = await self.context.send_message(umo, MessageChain(chain=[record]))
             if sent is False:
                 raise RuntimeError("AstrBot 未找到当前会话的平台实例。")
+            if reservation is not None:
+                try:
+                    await reservation.confirm()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception("保存点歌额度失败，继续处理已成功发送的语音。")
             sent_by_callback += 1
             duration = _wav_duration(path)
             if duration is None:
@@ -773,6 +905,10 @@ class BetterMusicPlugin(Star):
         active_music = getattr(self, "active_music", None)
         if active_music is not None:
             await active_music.close()
+        quota_api = self.get_music_quota_api()
+        if quota_api is not None:
+            await quota_api.close()
+        self._disconnect_balance_quota()
         await self.web.close()
         async with self._selection_lock:
             self._pending_selections.clear()

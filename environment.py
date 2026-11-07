@@ -240,7 +240,12 @@ class EnvironmentManager:
             "reply_templates": validate_templates({}),
             "reply_enabled": dict(REPLY_ENABLED_DEFAULTS),
             "passive_playback": {"max_seconds": 0, "gap_seconds": 0},
-            "active_playback": {"voice_id": "", "max_seconds": 60, "gap_seconds": 0},
+            "active_playback": {
+                "voice_id": "",
+                "max_seconds": 60,
+                "gap_seconds": 0,
+                "incremental_output": False,
+            },
             "cover_service": {"url": "", "token": ""},
             "song_log": dict(DEFAULT_SONG_LOG),
         }
@@ -280,7 +285,7 @@ class EnvironmentManager:
                     defaults["reply_enabled"][key] = value
         for field, keys in (
             ("passive_playback", ("max_seconds", "gap_seconds")),
-            ("active_playback", ("voice_id", "max_seconds", "gap_seconds")),
+            ("active_playback", ("voice_id", "max_seconds", "gap_seconds", "incremental_output")),
         ):
             stored_values = data.get(field, {})
             if not isinstance(stored_values, dict):
@@ -291,6 +296,9 @@ class EnvironmentManager:
                     if key == "voice_id":
                         if isinstance(value, str) and len(value) <= 200:
                             defaults[field][key] = value.strip()
+                    elif key == "incremental_output":
+                        if type(value) is bool:
+                            defaults[field][key] = value
                     elif key == "max_seconds":
                         if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
                             defaults[field][key] = value
@@ -372,7 +380,7 @@ class EnvironmentManager:
             )
         for field, keys in (
             ("passive_playback", {"max_seconds", "gap_seconds"}),
-            ("active_playback", {"voice_id", "max_seconds", "gap_seconds"}),
+            ("active_playback", {"voice_id", "max_seconds", "gap_seconds", "incremental_output"}),
             ("cover_service", {"url", "token"}),
         ):
             if field not in values:
@@ -406,6 +414,10 @@ class EnvironmentManager:
                     if not isinstance(value, str) or len(value.strip()) > 200:
                         raise ValueError("active_playback.voice_id必须是长度不超过200的字符串")
                     current_section[key] = value.strip()
+                elif key == "incremental_output":
+                    if type(value) is not bool:
+                        raise ValueError("active_playback.incremental_output必须是布尔值")
+                    current_section[key] = value
                 elif key == "url":
                     if not isinstance(value, str) or len(value.strip()) > 2048:
                         raise ValueError("cover_service.url必须是长度不超过2048的字符串")

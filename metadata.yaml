@@ -1,7 +1,7 @@
 name: astrbot_plugin_better_music
 display_name: 更好的点歌
 desc: 聚合网易云音乐、QQ音乐和酷狗搜索、登录与下载，并支持点歌分段发送。
-version: 1.0.1
+version: 1.1.0
 author: Xing
 repo: https://github.com/Nortea575/astrbot_plugin_better_music
 support_platforms:

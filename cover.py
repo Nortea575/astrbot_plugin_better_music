@@ -193,11 +193,14 @@ class CoverClient:
         voice_id: str,
         max_seconds: int,
         request_id: str,
+        output_mode: str | None = None,
     ) -> str:
         if not isinstance(voice_id, str) or not voice_id.strip():
             raise CoverServiceError("请先选择翻唱音色")
         if not isinstance(max_seconds, int) or isinstance(max_seconds, bool) or max_seconds < 0:
             raise ValueError("max_seconds 必须是非负整数")
+        if output_mode is not None and output_mode != "incremental":
+            raise ValueError("output_mode 仅支持 incremental")
         path = Path(audio_path)
         if not path.is_file() or path.is_symlink():
             raise CoverServiceError("找不到待翻唱的原始音频")
@@ -207,6 +210,8 @@ class CoverClient:
         form.add_field("voice_id", voice_id.strip())
         form.add_field("max_seconds", str(max_seconds))
         form.add_field("request_id", request_id)
+        if output_mode is not None:
+            form.add_field("output_mode", output_mode)
         try:
             with path.open("rb") as audio_file:
                 form.add_field(
@@ -249,6 +254,32 @@ class CoverClient:
         if type(payload.get("released")) is not bool or type(payload.get("pending")) is not bool:
             raise CoverServiceError("翻唱服务没有确认任务清理状态")
         return {"released": payload["released"], "pending": payload["pending"]}
+
+    async def ack_segment(self, job_id: str, sequence: int) -> dict[str, Any]:
+        """Acknowledge a downloaded incremental output segment."""
+        if not isinstance(job_id, str) or not job_id.strip() or len(job_id) > 200:
+            raise CoverServiceError("翻唱服务任务编号无效")
+        if not isinstance(sequence, int) or isinstance(sequence, bool) or sequence <= 0:
+            raise ValueError("分段序号必须是正整数")
+        base_url, token = self._config()
+        path = f"jobs/{quote(job_id.strip(), safe='')}/segments/{sequence}/ack"
+        timeout = aiohttp.ClientTimeout(total=_REQUEST_TIMEOUT_SECONDS)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            payload = await self._json_request(session, base_url, token, "POST", path)
+        if (
+            payload.get("acknowledged") is not True
+            or type(payload.get("sequence")) is not int
+            or payload.get("sequence") != sequence
+            or type(payload.get("released")) is not bool
+            or type(payload.get("pending")) is not bool
+        ):
+            raise CoverServiceError("翻唱服务没有确认分段释放")
+        return {
+            "acknowledged": True,
+            "sequence": sequence,
+            "released": payload["released"],
+            "pending": payload["pending"],
+        }
 
     async def cancel_job(self, job_id: str) -> dict[str, Any]:
         """Cancel or discard a job owned by this plugin request."""
@@ -301,6 +332,57 @@ class CoverClient:
             raise CoverServiceError("下载翻唱音频超时") from None
         except (aiohttp.ClientError, OSError):
             raise CoverServiceError("无法下载翻唱音频，请检查翻唱服务状态") from None
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    async def download_segment_audio(
+        self,
+        job_id: str,
+        sequence: int,
+        destination: Path,
+    ) -> Path:
+        """Stream one WAV segment to an atomically replaced local file."""
+        if not isinstance(job_id, str) or not job_id.strip() or len(job_id) > 200:
+            raise CoverServiceError("翻唱服务任务编号无效")
+        if not isinstance(sequence, int) or isinstance(sequence, bool) or sequence <= 0:
+            raise ValueError("分段序号必须是正整数")
+        base_url, token = self._config()
+        path = f"jobs/{quote(job_id.strip(), safe='')}/segments/{sequence}/audio"
+        headers = {"Authorization": f"Bearer {token}"} if token else {}
+        timeout = aiohttp.ClientTimeout(total=_UPLOAD_TIMEOUT_SECONDS)
+        target = Path(destination)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.is_symlink():
+            raise CoverServiceError("翻唱分段保存路径无效")
+        temporary = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
+        total = 0
+        try:
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(self._url(base_url, path), headers=headers) as response:
+                    if response.status < 200 or response.status >= 300:
+                        raise CoverServiceError(f"下载翻唱分段失败（HTTP {response.status}）")
+                    if response.content_type != "audio/wav":
+                        raise CoverServiceError("翻唱服务没有返回 WAV 分段")
+                    if response.content_length and response.content_length > _MAX_AUDIO_BYTES:
+                        raise CoverServiceError("翻唱分段超过 500 MiB 限制")
+                    with temporary.open("wb") as output:
+                        async for block in response.content.iter_chunked(1024 * 1024):
+                            total += len(block)
+                            if total > _MAX_AUDIO_BYTES:
+                                raise CoverServiceError("翻唱分段超过 500 MiB 限制")
+                            output.write(block)
+            if total <= 44:
+                raise CoverServiceError("翻唱服务返回了无效的 WAV 分段")
+            temporary.replace(target)
+            return target
+        except CoverServiceError:
+            raise
+        except asyncio.CancelledError:
+            raise
+        except asyncio.TimeoutError:
+            raise CoverServiceError("下载翻唱分段超时") from None
+        except (aiohttp.ClientError, OSError):
+            raise CoverServiceError("无法下载翻唱分段，请检查翻唱服务状态") from None
         finally:
             temporary.unlink(missing_ok=True)
 

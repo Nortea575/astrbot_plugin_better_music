@@ -282,135 +282,159 @@
             <p>配置聊天点歌、AI 翻唱和音频文件管理。</p>
           </div>
         </div>
-        <form id="settings-form" class="settings-form">
-          <section class="setting-group" aria-labelledby="passive-llm-title">
-            <h3 id="passive-llm-title">被动 LLM</h3>
-            <label class="setting-toggle" for="passive-llm">
-              <input id="passive-llm" name="passive_llm" type="checkbox" aria-describedby="passive-llm-description" />
-              <span>启用被动 LLM 记录</span>
-            </label>
-            <p id="passive-llm-description" class="helper-text">开启后记录当前对话的点歌时间、顺序和发送结果，向下次正常 AI 对话提供最近 10 条记录；不额外调用模型。仅当前对话，不保证精确原消息位置。</p>
-            <div class="playback-fields" aria-label="被动点歌播放限制">
-              <label class="field" for="passive-max-seconds">
-                <span>最长播放时间（秒；0 为不限）</span>
-                <input id="passive-max-seconds" name="passive_playback.max_seconds" type="number" min="0" step="1" value="0" required />
+        <form id="settings-form" class="settings-form" novalidate>
+          <div id="settings-tabs" class="provider-tabs settings-tabs" role="tablist" aria-label="插件设置分类">
+            <button id="settings-tab-passive" class="tab-button" type="button" role="tab" aria-controls="settings-panel-passive" aria-selected="true" tabindex="0" data-settings-tab="passive">被动 LLM</button>
+            <button id="settings-tab-active" class="tab-button" type="button" role="tab" aria-controls="settings-panel-active" aria-selected="false" tabindex="-1" data-settings-tab="active">主动 LLM</button>
+            <button id="settings-tab-cover" class="tab-button" type="button" role="tab" aria-controls="settings-panel-cover" aria-selected="false" tabindex="-1" data-settings-tab="cover">翻唱服务</button>
+            <button id="settings-tab-storage" class="tab-button" type="button" role="tab" aria-controls="settings-panel-storage" aria-selected="false" tabindex="-1" data-settings-tab="storage">日志与存储</button>
+          </div>
+
+          <section id="settings-panel-passive" class="settings-panel is-active" role="tabpanel" aria-labelledby="settings-tab-passive" data-settings-panel="passive" tabindex="0">
+            <section class="setting-group" aria-labelledby="passive-llm-title">
+              <h3 id="passive-llm-title">被动 LLM</h3>
+              <label class="setting-toggle" for="passive-llm">
+                <input id="passive-llm" name="passive_llm" type="checkbox" aria-describedby="passive-llm-description" />
+                <span>启用被动 LLM 记录</span>
               </label>
-              <label class="field" for="passive-gap-seconds">
-                <span>分段发送间隔（秒；0 为连续发送）</span>
-                <input id="passive-gap-seconds" name="passive_playback.gap_seconds" type="number" min="0" step="any" value="0" required />
-              </label>
-            </div>
-            <p class="helper-text">这些限制只应用于被动聊天点歌；网页上的手动发送不受影响。</p>
+              <p id="passive-llm-description" class="helper-text">开启后记录当前对话的点歌时间、顺序和发送结果，向下次正常 AI 对话提供最近 10 条记录；不额外调用模型。仅当前对话，不保证精确原消息位置。</p>
+              <div class="playback-fields" aria-label="被动点歌播放限制">
+                <label class="field" for="passive-max-seconds">
+                  <span>最长播放时间（秒；0 为不限）</span>
+                  <input id="passive-max-seconds" name="passive_playback.max_seconds" type="number" min="0" step="1" value="0" required />
+                </label>
+                <label class="field" for="passive-gap-seconds">
+                  <span>分段发送间隔（秒；0 为连续发送）</span>
+                  <input id="passive-gap-seconds" name="passive_playback.gap_seconds" type="number" min="0" step="any" value="0" required />
+                </label>
+              </div>
+              <p class="helper-text">这些限制只应用于被动聊天点歌；网页上的手动发送不受影响。</p>
+            </section>
           </section>
 
-          <section class="setting-group" aria-labelledby="active-llm-title">
-            <h3 id="active-llm-title">主动 LLM</h3>
-            <label class="setting-toggle" for="active-llm">
-              <input id="active-llm" name="active_llm" type="checkbox" aria-describedby="active-llm-description" />
-              <span>启用主动 LLM</span>
-            </label>
-            <p id="active-llm-description" class="helper-text">开启后，正常 AI 对话可自主判断是否点歌，并使用所选音色翻唱；需要支持 tool calling 的模型，且人格设定允许。现有唤醒词指令会暂停处理。</p>
-            <div class="playback-fields active-playback-fields" aria-label="主动翻唱设置">
-              <label class="field" for="active-voice-id">
-                <span>翻唱音色</span>
-                <select id="active-voice-id" name="active_playback.voice_id">
-                  <option value="">选择音色</option>
-                </select>
+          <section id="settings-panel-active" class="settings-panel" role="tabpanel" aria-labelledby="settings-tab-active" data-settings-panel="active" tabindex="0" hidden>
+            <section class="setting-group" aria-labelledby="active-llm-title">
+              <h3 id="active-llm-title">主动 LLM</h3>
+              <label class="setting-toggle" for="active-llm">
+                <input id="active-llm" name="active_llm" type="checkbox" aria-describedby="active-llm-description" />
+                <span>启用主动 LLM</span>
               </label>
-              <label class="field" for="active-max-seconds">
-                <span>最长演唱时间（秒；0 为不限）</span>
-                <input id="active-max-seconds" name="active_playback.max_seconds" type="number" min="0" step="1" value="60" required />
+              <p id="active-llm-description" class="helper-text">开启后，正常 AI 对话可自主判断是否点歌，并使用所选音色翻唱；需要支持 tool calling 的模型，且人格设定允许。现有唤醒词指令会暂停处理。</p>
+              <label class="setting-toggle incremental-toggle" for="active-incremental-output">
+                <input id="active-incremental-output" name="active_playback.incremental_output" type="checkbox" aria-describedby="active-incremental-description active-incremental-capability" />
+                <span>边生成边发送</span>
               </label>
-              <label class="field" for="active-gap-seconds">
-                <span>分段发送间隔（秒；0 为连续发送）</span>
-                <input id="active-gap-seconds" name="active_playback.gap_seconds" type="number" min="0" step="any" value="0" required />
-              </label>
-            </div>
-            <p class="helper-text">时长和间隔只用于主动 LLM 触发的翻唱。导入音色后可在此选择并保存。</p>
+              <p id="active-incremental-description" class="helper-text">每段处理完成后按顺序发送。首段也需要等待处理完成；服务不支持分段处理时会继续整首流程。</p>
+              <p id="active-incremental-capability" class="capability-note" role="status" aria-live="polite">尚未检查翻唱服务能力。此开关仍会按当前选择保存。</p>
+              <div class="playback-fields active-playback-fields" aria-label="主动翻唱设置">
+                <label class="field" for="active-voice-id">
+                  <span>翻唱音色</span>
+                  <select id="active-voice-id" name="active_playback.voice_id">
+                    <option value="">选择音色</option>
+                  </select>
+                </label>
+                <label class="field" for="active-max-seconds">
+                  <span>最长演唱时间（秒；0 为不限）</span>
+                  <input id="active-max-seconds" name="active_playback.max_seconds" type="number" min="0" step="1" value="60" required />
+                </label>
+                <label class="field" for="active-gap-seconds">
+                  <span>分段发送间隔（秒；0 为连续发送）</span>
+                  <input id="active-gap-seconds" name="active_playback.gap_seconds" type="number" min="0" step="any" value="0" required />
+                </label>
+              </div>
+              <p class="helper-text">时长和间隔只用于主动 LLM 触发的翻唱。导入音色后可在此选择并保存。</p>
+            </section>
           </section>
 
-          <section class="setting-group" aria-labelledby="cover-service-title">
-            <h3 id="cover-service-title">翻唱服务与音色</h3>
-            <p class="helper-text">同机或异机部署均填写服务 URL 和访问密钥；插件本机无需安装 RVC 重依赖。导入音色时上传模型文件，不填写远端文件路径。</p>
-            <div class="cover-service-fields">
-              <label class="field" for="cover-service-url">
-                <span>翻唱服务 URL</span>
-                <input id="cover-service-url" name="cover_service.url" type="url" inputmode="url" autocomplete="url" placeholder="http://127.0.0.1:17866" />
-              </label>
-              <label class="field" for="cover-service-token">
-                <span>访问密钥</span>
-                <input id="cover-service-token" name="cover_service.token" type="password" autocomplete="new-password" placeholder="留空保留已保存密钥" />
-              </label>
-            </div>
-            <div class="cover-service-actions">
-              <label class="setting-toggle cover-token-clear" for="cover-service-clear-token">
-                <input id="cover-service-clear-token" name="cover_service.clear_token" type="checkbox" disabled />
-                <span>清除已保存密钥</span>
-              </label>
-            </div>
-            <p class="helper-text" id="cover-token-status">尚未保存访问密钥。</p>
-
-            <div class="cover-import-section">
-              <h4>导入 RVC 音色</h4>
-              <div class="cover-import-fields" data-transient>
-                <label class="field" for="cover-voice-name">
-                  <span>音色名称</span>
-                  <input id="cover-voice-name" type="text" maxlength="80" autocomplete="off" placeholder="例如：我的翻唱音色" />
+          <section id="settings-panel-cover" class="settings-panel" role="tabpanel" aria-labelledby="settings-tab-cover" data-settings-panel="cover" tabindex="0" hidden>
+            <section class="setting-group" aria-labelledby="cover-service-title">
+              <h3 id="cover-service-title">翻唱服务与音色</h3>
+              <p class="helper-text">同机或异机部署均填写服务 URL 和访问密钥；插件本机无需安装 RVC 重依赖。导入音色时上传模型文件，不填写远端文件路径。</p>
+              <div class="cover-service-fields">
+                <label class="field" for="cover-service-url">
+                  <span>翻唱服务 URL</span>
+                  <input id="cover-service-url" name="cover_service.url" type="url" inputmode="url" autocomplete="url" placeholder="http://127.0.0.1:17866" />
                 </label>
-                <label class="field" for="cover-model-file">
-                  <span>模型文件（.pt / .pth）</span>
-                  <input id="cover-model-file" type="file" accept=".pt,.pth,application/octet-stream" />
-                </label>
-                <label class="field" for="cover-index-file">
-                  <span>索引文件（可选 .index）</span>
-                  <input id="cover-index-file" type="file" accept=".index,application/octet-stream" />
+                <label class="field" for="cover-service-token">
+                  <span>访问密钥</span>
+                  <input id="cover-service-token" name="cover_service.token" type="password" autocomplete="new-password" placeholder="留空保留已保存密钥" />
                 </label>
               </div>
               <div class="cover-service-actions">
-                <button class="button primary small" id="cover-import" type="button">上传并导入音色</button>
+                <label class="setting-toggle cover-token-clear" for="cover-service-clear-token">
+                  <input id="cover-service-clear-token" name="cover_service.clear_token" type="checkbox" disabled />
+                  <span>清除已保存密钥</span>
+                </label>
               </div>
-              <p class="helper-text">索引文件可选；导入完成后可在主动 LLM 中选择音色。</p>
-              <p class="inline-status" id="cover-import-status" role="status" aria-live="polite"></p>
-            </div>
+              <p class="helper-text" id="cover-token-status">尚未保存访问密钥。</p>
+
+              <div class="cover-import-section">
+                <h4>导入 RVC 音色</h4>
+                <div class="cover-import-fields" data-transient>
+                  <label class="field" for="cover-voice-name">
+                    <span>音色名称</span>
+                    <input id="cover-voice-name" type="text" maxlength="80" autocomplete="off" placeholder="例如：我的翻唱音色" />
+                  </label>
+                  <label class="field" for="cover-model-file">
+                    <span>模型文件（.pt / .pth）</span>
+                    <input id="cover-model-file" type="file" accept=".pt,.pth,application/octet-stream" />
+                  </label>
+                  <label class="field" for="cover-index-file">
+                    <span>索引文件（可选 .index）</span>
+                    <input id="cover-index-file" type="file" accept=".index,application/octet-stream" />
+                  </label>
+                </div>
+                <div class="cover-service-actions">
+                  <button class="button primary small" id="cover-import" type="button">上传并导入音色</button>
+                </div>
+                <p class="helper-text">索引文件可选；导入完成后可在主动 LLM 中选择并保存。</p>
+                <p class="inline-status" id="cover-import-status" role="status" aria-live="polite"></p>
+              </div>
+            </section>
           </section>
 
-          <section class="setting-group" aria-labelledby="song-log-title">
-            <h3 id="song-log-title">点歌日志</h3>
-            <label class="setting-toggle" for="song-log-enabled">
-              <input id="song-log-enabled" name="song_log.enabled" type="checkbox" aria-describedby="song-log-description" />
-              <span>启用点歌任务结束日志</span>
-            </label>
-            <p id="song-log-description" class="helper-text">每个播放任务结束后向指定会话发送一条结果；覆盖成功、部分发送和失败，不记录搜索、下载或环境测试。</p>
-            <div class="playback-fields song-log-fields" aria-label="点歌日志发送目标">
-              <label class="field" for="song-log-platform">
-                <span>平台实例</span>
-                <select id="song-log-platform" name="song_log.platform_id"></select>
+          <section id="settings-panel-storage" class="settings-panel" role="tabpanel" aria-labelledby="settings-tab-storage" data-settings-panel="storage" tabindex="0" hidden>
+            <section class="setting-group" aria-labelledby="song-log-title">
+              <h3 id="song-log-title">点歌日志</h3>
+              <label class="setting-toggle" for="song-log-enabled">
+                <input id="song-log-enabled" name="song_log.enabled" type="checkbox" aria-describedby="song-log-description" />
+                <span>启用点歌任务结束日志</span>
               </label>
-              <label class="field" for="song-log-target-type">
-                <span>会话类型</span>
-                <select id="song-log-target-type" name="song_log.target_type">
-                  <option value="private">私聊</option>
-                  <option value="group">群聊</option>
-                </select>
+              <p id="song-log-description" class="helper-text">每个播放任务结束后向指定会话发送一条结果；覆盖成功、部分发送和失败，不记录搜索、下载或环境测试。</p>
+              <div class="playback-fields song-log-fields" aria-label="点歌日志发送目标">
+                <label class="field" for="song-log-platform">
+                  <span>平台实例</span>
+                  <select id="song-log-platform" name="song_log.platform_id"></select>
+                </label>
+                <label class="field" for="song-log-target-type">
+                  <span>会话类型</span>
+                  <select id="song-log-target-type" name="song_log.target_type">
+                    <option value="private">私聊</option>
+                    <option value="group">群聊</option>
+                  </select>
+                </label>
+                <label class="field" for="song-log-target-id">
+                  <span id="song-log-target-id-label">私聊 ID</span>
+                  <input id="song-log-target-id" name="song_log.target_id" type="text" maxlength="128" autocomplete="off" placeholder="输入接收方 ID" />
+                </label>
+              </div>
+            </section>
+
+            <section class="setting-group" aria-labelledby="song-limit-title">
+              <h3 id="song-limit-title">歌曲文件数量</h3>
+              <label class="field max-songs-field" for="max-songs">
+                <span>歌曲总数上限</span>
+                <input id="max-songs" name="max_songs" type="number" min="1" step="1" value="30" required />
               </label>
-              <label class="field" for="song-log-target-id">
-                <span id="song-log-target-id-label">私聊 ID</span>
-                <input id="song-log-target-id" name="song_log.target_id" type="text" maxlength="128" autocomplete="off" placeholder="输入接收方 ID" />
-              </label>
-            </div>
+              <p class="helper-text">默认保留 30 首歌曲。降低上限并保存后，会优先清理最早下载的歌曲及其文件。</p>
+            </section>
           </section>
 
-          <section class="setting-group" aria-labelledby="song-limit-title">
-            <h3 id="song-limit-title">歌曲文件数量</h3>
-            <label class="field max-songs-field" for="max-songs">
-              <span>歌曲总数上限</span>
-              <input id="max-songs" name="max_songs" type="number" min="1" step="1" value="30" required />
-            </label>
-            <p class="helper-text">默认保留 30 首歌曲。降低上限并保存后，会优先清理最早下载的歌曲及其文件。</p>
-          </section>
-          <button class="button primary form-submit" id="save-settings" type="submit">保存设置</button>
+          <div class="settings-footer">
+            <button class="button primary form-submit" id="save-settings" type="submit">保存设置</button>
+            <p class="inline-status" id="settings-status" role="status" aria-live="polite"></p>
+          </div>
         </form>
-        <p class="inline-status" id="settings-status" role="status" aria-live="polite"></p>
       </section>
 
       <footer class="compatibility-note">

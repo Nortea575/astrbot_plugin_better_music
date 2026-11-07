@@ -16,6 +16,8 @@
 
 插件与服务之间通过 HTTP 上传和下载文件，不要求共享文件系统。
 
+接入原有服务时不需要改变地址、访问密钥或音色配置。增量输出是可选能力；未实现该能力的兼容服务仍使用完整结果接口。
+
 ## 兼容性要求
 
 所有 JSON 响应（包括错误响应）都必须包含数值型 `api_version: 1`。健康响应还必须声明字符串型 `pipeline_version: "2"`，并确认任务 ACK、取消与临时任务能力：
@@ -37,6 +39,8 @@
 
 如果服务启用了鉴权，所有端点都应验证 Bearer 密钥。HTTP 服务的访问应限于可信网络；跨公网连接应使用 HTTPS。
 
+支持边生成边发送的服务还应在 `capabilities` 中声明 `"incremental_segments": true`。插件仅在用户启用此功能且服务明确声明支持后，才提交增量模式字段；不能仅根据服务版本号推断支持。该扩展沿用 API v1、管线 v2，三个原有清理能力仍为必需。
+
 ## API
 
 所有路径均相对于配置的服务根地址，前缀为 `/v1`。除音频下载外，响应均为带有 `api_version: 1` 的 JSON。
@@ -49,6 +53,8 @@
 | `POST /v1/jobs` | 提交翻唱任务 |
 | `GET /v1/jobs/{job_id}` | 查询任务状态 |
 | `GET /v1/jobs/{job_id}/audio` | 下载已完成的 WAV 音频 |
+| `GET /v1/jobs/{job_id}/segments/{sequence}/audio` | 可选：下载已生成的指定片段 |
+| `POST /v1/jobs/{job_id}/segments/{sequence}/ack` | 可选：确认接收并释放指定片段 |
 | `POST /v1/jobs/{job_id}/ack` | 确认接收结果并释放任务数据 |
 | `DELETE /v1/jobs/{job_id}` | 取消或丢弃任务并释放任务数据 |
 
@@ -66,6 +72,7 @@
 - `voice_id`：`GET /v1/voices` 返回的音色编号。
 - `max_seconds`：结果时长上限，`0` 表示不限制。
 - `request_id`：本次请求的唯一编号。
+- `output_mode`：可选，仅在健康检查声明支持时使用值 `incremental`，请求逐段生成与交付。不传时必须保持原有整首流程。
 
 服务接受任务后返回 HTTP 200 或 202，并提供 `job_id`；允许直接放在根对象，也允许放在 `job.job_id` 或 `job.id`。例如：
 
@@ -89,6 +96,45 @@
 ```
 
 失败响应应提供简短的 `error` 或 `message`。
+
+### 可选：逐段生成与交付
+
+增量任务在仍处于处理中时就可以发布已完成片段。任务状态除原有身份、音色与管线字段外，还应提供以下字段；状态对象仍可位于根对象或 `job` 内：
+
+```json
+{
+  "api_version": 1,
+  "status": "converting",
+  "voice_id": "voice-1",
+  "voice_version": "model-v1",
+  "pipeline_version": "2",
+  "output_mode": "incremental",
+  "segment_seconds": 30,
+  "total_segments": 3,
+  "segments": [
+    {
+      "sequence": 1,
+      "start_seconds": 0,
+      "duration_seconds": 30,
+      "size_bytes": 7938044,
+      "sha256": "文件内容的64位小写十六进制SHA-256",
+      "released": false
+    }
+  ]
+}
+```
+
+`sequence` 从 1 连续递增，时间范围连续且不得重叠。`segment_seconds` 为本任务采用的分段长度，须大于 0 且不超过 60 秒，并在任务中保持不变。`total_segments` 是裁切播放时长后的片段总数；`segments` 按序列出已完成片段，包括已经确认释放的元数据。每段时长须大于 0 且不超过声明的分段长度，末段可较短。片段发布后，其内容和身份元数据必须保持不变；只有全部片段生成成功，任务才能进入 `completed`。失败或取消不能伪装为完整结果。
+
+`GET /v1/jobs/{job_id}/segments/{sequence}/audio` 返回指定片段的 WAV 文件，使用 `Content-Type: audio/wav`。插件先校验大小、SHA-256、可解码性与时长，再持久保存并转换为 QQ 语音，然后调用该片段的 ACK。已确认释放的片段可以不再提供下载；重复 ACK 必须幂等。
+
+增量片段使用线性 PCM 编码，同一任务的采样率、通道数和位深保持一致。插件会另行转换发送格式，完整缓存中的原始翻唱文件保留服务返回的采样率、通道数和位深。
+
+单段 ACK 成功响应为 `{"api_version":1,"acknowledged":true,"sequence":1,"released":true,"pending":false}`；若仍有下载占用，可返回 HTTP 202、`acknowledged:true`、`released:false` 与 `pending:true`，并在读者结束后释放。清理失败应返回错误，不能声明已确认或已释放。单段 ACK 只释放该片段，不能删除仍用于后续推理的输入。所有片段下载完成且任务终态成功后，插件再通过原有任务 ACK 释放任务目录。
+
+服务端应限制尚未确认的片段数量，达到上限时等待客户端消费，避免发送间隔较长时无限生成文件。还应对等待确认且无客户端活动的活跃任务设置有限超时；客户端消失后，停止推理子进程并清理临时数据。合法的状态查询、下载与 ACK 应更新客户端活动时间。插件在等待发送间隔或队列腾出空间时继续低频查询，服务不能把较长的播放间隔、正常模型加载或推理误判成客户端失联。
+
+插件只将全部片段生成并校验成功的结果标记为完整缓存。部分已发送后若推理或发送失败，反馈与记录会保留实际发送数量；已经确认发送的片段不会在同一任务中自动重发。
 
 ### 下载与确认
 

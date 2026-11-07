@@ -291,6 +291,25 @@ h5 {
   border-bottom: 1px solid var(--border);
 }
 
+.settings-tabs {
+  margin-bottom: -2px;
+  padding-inline-end: 8px;
+}
+
+.settings-panel[hidden] {
+  display: none;
+}
+
+.settings-panel {
+  display: grid;
+  min-width: 0;
+  gap: 18px;
+}
+
+html[data-view-ready="true"] .settings-panel.is-animating {
+  animation: panel-enter 160ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
 .tab-button {
   flex: 0 0 auto;
   padding: 8px 12px 9px;
@@ -589,6 +608,33 @@ html[data-theme="dark"] .button.primary {
   display: grid;
   max-width: 780px;
   gap: 20px;
+}
+
+.settings-footer {
+  display: grid;
+  justify-items: start;
+  gap: 8px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+
+.incremental-toggle {
+  margin-top: 4px;
+}
+
+.capability-note {
+  max-width: 72ch;
+  margin: -3px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.capability-note[data-kind="success"] {
+  color: var(--success);
+}
+
+.capability-note[data-kind="warning"] {
+  color: var(--warning);
 }
 
 .setting-group {

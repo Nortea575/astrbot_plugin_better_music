@@ -33,6 +33,8 @@ SendAudioCallback = Callable[[Path], Awaitable[Any]]
 _MAX_AUDIO_BYTES = 250 * 1024 * 1024
 _COVER_PIPELINE_VERSION = "2"
 _COVER_JOB_TIMEOUT_SECONDS = 60 * 60
+_COVER_INCREMENTAL_HEARTBEAT_SECONDS = 10.0
+_COVER_INCREMENTAL_POLL_SECONDS = 0.35
 _COVER_ID_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _COVER_SEGMENT_PATTERN = re.compile(r"^segment_[0-9]{3,}\.wav$")
 
@@ -1026,6 +1028,7 @@ class MusicRuntime:
                 "created_at": utc_now().isoformat(),
                 "max_seconds": max_seconds,
                 "pipeline_version": _COVER_PIPELINE_VERSION,
+                "render_mode": "whole",
                 "source_duration": source_duration,
                 "planned_seconds": planned_seconds,
                 "capped": source_capped or output_capped,
@@ -1117,6 +1120,666 @@ class MusicRuntime:
             delay = min(3.5, delay + 0.35)
         raise CoverServiceError("翻唱任务超过 60 分钟")
 
+    @staticmethod
+    def _cover_job_fields(payload: Any) -> dict[str, Any]:
+        if not isinstance(payload, dict):
+            raise CoverServiceError("翻唱服务返回了无效的任务状态")
+        job = payload.get("job")
+        if isinstance(job, dict):
+            return {**payload, **job}
+        return payload
+
+    @staticmethod
+    def _incremental_segment_fields(
+        value: Any,
+        sequence: int,
+        *,
+        max_duration_seconds: float,
+    ) -> dict[str, Any]:
+        if not isinstance(value, dict):
+            raise CoverServiceError("翻唱服务返回了无效的分段清单")
+        actual_sequence = value.get("sequence")
+        start = value.get("start_seconds")
+        duration = value.get("duration_seconds")
+        size = value.get("size_bytes")
+        digest = value.get("sha256")
+        released = value.get("released")
+        valid_number = lambda number: (
+            isinstance(number, (int, float))
+            and not isinstance(number, bool)
+            and math.isfinite(float(number))
+        )
+        if (
+            not isinstance(actual_sequence, int)
+            or isinstance(actual_sequence, bool)
+            or actual_sequence != sequence
+            or not valid_number(start)
+            or float(start) < 0
+            or not valid_number(duration)
+            or float(duration) <= 0
+            or float(duration) > max_duration_seconds + 0.001
+            or not isinstance(size, int)
+            or isinstance(size, bool)
+            or size <= 44
+            or size > _MAX_AUDIO_BYTES
+            or not isinstance(digest, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", digest)
+            or type(released) is not bool
+        ):
+            raise CoverServiceError(f"翻唱服务第{sequence}段元数据无效")
+        return {
+            "sequence": sequence,
+            "start_seconds": float(start),
+            "duration_seconds": float(duration),
+            "size_bytes": size,
+            "sha256": digest,
+            "released": released,
+        }
+
+    @staticmethod
+    def _write_wav_prefix(source_path: Path, destination: Path, frames_to_write: int) -> None:
+        temporary = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            with wave.open(str(source_path), "rb") as source:
+                params = source.getparams()
+                if (
+                    params.comptype != "NONE"
+                    or frames_to_write <= 0
+                    or frames_to_write > params.nframes
+                    or params.nchannels <= 0
+                    or params.sampwidth <= 0
+                    or params.framerate <= 0
+                ):
+                    raise AudioError("翻唱服务分段无法按目标时长安全裁剪")
+                with wave.open(str(temporary), "wb") as output:
+                    output.setnchannels(params.nchannels)
+                    output.setsampwidth(params.sampwidth)
+                    output.setframerate(params.framerate)
+                    remaining = frames_to_write
+                    while remaining:
+                        samples = source.readframes(min(remaining, 262_144))
+                        if not samples:
+                            raise AudioError("翻唱分段采样帧不完整")
+                        written = len(samples) // (params.nchannels * params.sampwidth)
+                        if written <= 0 or written > remaining:
+                            raise AudioError("翻唱分段采样帧无效")
+                        output.writeframes(samples)
+                        remaining -= written
+            temporary.replace(destination)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    @staticmethod
+    def _merge_incremental_wavs(
+        directory: Path,
+        segment_names: list[str],
+        source_names: list[str],
+    ) -> None:
+        normalized = directory / "normalized.wav"
+        temporary = directory / ".normalized.wav.tmp"
+        try:
+            output_params = None
+            with wave.open(str(temporary), "wb") as combined:
+                for name in segment_names:
+                    path = directory / name
+                    with wave.open(str(path), "rb") as segment:
+                        params = segment.getparams()
+                        if (
+                            params.comptype != "NONE"
+                            or params.nchannels != 1
+                            or params.sampwidth != 2
+                            or params.framerate != 16_000
+                            or params.nframes <= 0
+                        ):
+                            raise AudioError(f"翻唱缓存分段格式无效：{name}")
+                        if output_params is None:
+                            output_params = params
+                            combined.setnchannels(params.nchannels)
+                            combined.setsampwidth(params.sampwidth)
+                            combined.setframerate(params.framerate)
+                        elif (
+                            params.nchannels != output_params.nchannels
+                            or params.sampwidth != output_params.sampwidth
+                            or params.framerate != output_params.framerate
+                        ):
+                            raise AudioError("翻唱缓存分段格式不一致")
+                        while True:
+                            samples = segment.readframes(262_144)
+                            if not samples:
+                                break
+                            combined.writeframes(samples)
+            if output_params is None:
+                raise AudioError("翻唱结果没有可合并的音频分段")
+            temporary.replace(normalized)
+            generated_temp = directory / ".generated.bin.tmp"
+            try:
+                source_dir = directory / ".sources"
+                source_params = None
+                with wave.open(str(generated_temp), "wb") as generated:
+                    for name in source_names:
+                        path = source_dir / name
+                        with wave.open(str(path), "rb") as segment:
+                            params = segment.getparams()
+                            if (
+                                params.comptype != "NONE"
+                                or params.nchannels <= 0
+                                or params.sampwidth <= 0
+                                or params.framerate <= 0
+                                or params.nframes <= 0
+                            ):
+                                raise AudioError(f"翻唱源音频分段格式无效：{name}")
+                            signature = (
+                                params.nchannels,
+                                params.sampwidth,
+                                params.framerate,
+                                params.comptype,
+                            )
+                            if source_params is None:
+                                source_params = signature
+                                generated.setnchannels(params.nchannels)
+                                generated.setsampwidth(params.sampwidth)
+                                generated.setframerate(params.framerate)
+                            elif source_params != signature:
+                                raise AudioError("翻唱源音频分段格式不一致")
+                            while True:
+                                samples = segment.readframes(131_072)
+                                if not samples:
+                                    break
+                                generated.writeframes(samples)
+                if source_params is None:
+                    raise AudioError("翻唱结果没有可合并的源音频分段")
+                generated_temp.replace(directory / "generated.bin")
+            finally:
+                generated_temp.unlink(missing_ok=True)
+            shutil.rmtree(directory / ".sources", ignore_errors=True)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    async def _commit_incremental_cover_cache(
+        self,
+        pending_dir: Path,
+        cache_dir: Path,
+        *,
+        cache_key: str,
+        source_sha256: str,
+        voice_id: str,
+        voice_version: str,
+        max_seconds: int,
+    ) -> tuple[dict[str, Any], bool]:
+        async with self._lock:
+            winner = self._read_cover_cache(
+                cache_dir,
+                cache_key=cache_key,
+                source_sha256=source_sha256,
+                voice_id=voice_id,
+                voice_version=voice_version,
+                max_seconds=max_seconds,
+            )
+            if winner is not None:
+                if pending_dir.is_symlink():
+                    raise AudioError("增量翻唱临时目录不能是符号链接")
+                shutil.rmtree(pending_dir, ignore_errors=True)
+                return winner, True
+            if is_path_link(cache_dir):
+                raise AudioError("翻唱缓存路径不能是符号链接")
+            if cache_dir.exists():
+                shutil.rmtree(cache_dir)
+            pending_dir.replace(cache_dir)
+        entry = self._read_cover_cache(
+            cache_dir,
+            cache_key=cache_key,
+            source_sha256=source_sha256,
+            voice_id=voice_id,
+            voice_version=voice_version,
+            max_seconds=max_seconds,
+        )
+        if entry is None:
+            raise AudioError("增量翻唱缓存写入后校验失败")
+        return entry, False
+
+    async def _stream_incremental_cover(
+        self,
+        client: CoverClient,
+        job_id: str,
+        song_dir: Path,
+        covers_dir: Path,
+        cache_dir: Path,
+        send_audio_callback: SendAudioCallback,
+        output: dict[str, Any],
+        *,
+        cache_key: str,
+        source_sha256: str,
+        source_duration: float,
+        voice: dict[str, Any],
+        voice_id: str,
+        voice_version: str,
+        max_seconds: int,
+        gap_seconds: float,
+    ) -> tuple[dict[str, Any], bool]:
+        if is_path_link(covers_dir):
+            raise AudioError("翻唱缓存目录不能是符号链接")
+        covers_dir.mkdir(parents=True, exist_ok=True)
+        if song_dir.is_symlink() or not covers_dir.resolve().is_relative_to(song_dir.resolve()):
+            raise AudioError("翻唱缓存目录超出歌曲目录")
+        pending_dir = covers_dir / f".pending-{uuid.uuid4().hex}"
+        pending_dir.mkdir()
+        queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=2)
+        sentinel = object()
+        loop = asyncio.get_running_loop()
+        seen_segments: dict[int, dict[str, Any]] = {}
+        processed_sequence = 0
+        total_segments: int | None = None
+        segment_duration_limit: float | None = None
+        timeline_seconds = 0.0
+        selected_seconds = 0.0
+        selected_source_frames = 0
+        source_signature: tuple[int, int, int, str] | None = None
+        output_capped = False
+        final_names: list[str] = []
+        source_names: list[str] = []
+        producer_finished = False
+        last_send_succeeded_at: float | None = None
+        queue_wait_seconds = 0.0
+
+        async def read_and_validate_status() -> tuple[dict[str, Any], str, list[dict[str, Any]], int | None]:
+            nonlocal total_segments, segment_duration_limit
+            payload = await client.job_status(job_id)
+            job = self._cover_job_fields(payload)
+            status = str(job.get("status", "")).strip().lower()
+            if (
+                str(job.get("pipeline_version", "")) != _COVER_PIPELINE_VERSION
+                or job.get("voice_id") != voice_id
+                or str(job.get("voice_version", "")) != voice_version
+                or job.get("output_mode") != "incremental"
+            ):
+                raise CoverServiceError("翻唱任务音色、推理管线或增量参数不匹配")
+            reported_segment_seconds = job.get("segment_seconds")
+            if (
+                not isinstance(reported_segment_seconds, (int, float))
+                or isinstance(reported_segment_seconds, bool)
+                or not math.isfinite(float(reported_segment_seconds))
+                or float(reported_segment_seconds) <= 0
+                or float(reported_segment_seconds) > 60
+            ):
+                raise CoverServiceError("翻唱任务分段时长无效")
+            if (
+                segment_duration_limit is not None
+                and abs(segment_duration_limit - float(reported_segment_seconds)) > 0.001
+            ):
+                raise CoverServiceError("翻唱任务分段时长发生变化")
+            segment_duration_limit = float(reported_segment_seconds)
+            reported_total = job.get("total_segments")
+            if reported_total is not None:
+                if (
+                    not isinstance(reported_total, int)
+                    or isinstance(reported_total, bool)
+                    or reported_total < 0
+                ):
+                    raise CoverServiceError("翻唱任务总分段数无效")
+                if reported_total > 0:
+                    if total_segments is not None and total_segments != reported_total:
+                        raise CoverServiceError("翻唱任务总分段数发生变化")
+                    total_segments = reported_total
+            raw_segments = job.get("segments", [])
+            if not isinstance(raw_segments, list):
+                raise CoverServiceError("翻唱任务分段清单无效")
+            if total_segments is not None and len(raw_segments) > total_segments:
+                raise CoverServiceError("翻唱任务分段清单超过总分段数")
+            parsed: list[dict[str, Any]] = []
+            expected_start = 0.0
+            for index, value in enumerate(raw_segments, start=1):
+                item = self._incremental_segment_fields(
+                    value,
+                    index,
+                    max_duration_seconds=segment_duration_limit,
+                )
+                if abs(item["start_seconds"] - expected_start) > 0.005:
+                    raise CoverServiceError(f"翻唱服务第{index}段时间轴不连续")
+                expected_start = item["start_seconds"] + item["duration_seconds"]
+                previous = seen_segments.get(index)
+                if previous is not None:
+                    stable_previous = {key: val for key, val in previous.items() if key != "released"}
+                    stable_current = {key: val for key, val in item.items() if key != "released"}
+                    if stable_current != stable_previous:
+                        raise CoverServiceError(f"翻唱服务第{index}段元数据发生变化")
+                    if previous["released"] and not item["released"]:
+                        raise CoverServiceError(f"翻唱服务第{index}段确认状态回退")
+                    seen_segments[index] = item
+                elif index <= processed_sequence:
+                    raise CoverServiceError(f"翻唱服务第{index}段清单丢失")
+                elif item["released"]:
+                    raise CoverServiceError(f"翻唱服务第{index}段在客户端处理前已释放")
+                parsed.append(item)
+            return job, status, parsed, total_segments
+
+        async def put_with_heartbeat(item: Any) -> None:
+            nonlocal queue_wait_seconds
+            wait_started_at = loop.time()
+            put_task = asyncio.create_task(queue.put(item))
+            try:
+                while not put_task.done():
+                    done, _pending = await asyncio.wait(
+                        {put_task}, timeout=_COVER_INCREMENTAL_HEARTBEAT_SECONDS
+                    )
+                    if done:
+                        break
+                    _heartbeat_job, heartbeat_status, _segments, _total = await read_and_validate_status()
+                    if heartbeat_status in {"failed", "error", "cancelled", "canceled"}:
+                        raise CoverServiceError("翻唱服务在等待发送队列时终止了任务")
+                await put_task
+            finally:
+                queue_wait_seconds += max(0.0, loop.time() - wait_started_at)
+                if not put_task.done():
+                    put_task.cancel()
+                    await asyncio.gather(put_task, return_exceptions=True)
+
+        async def producer() -> None:
+            nonlocal processed_sequence, total_segments, timeline_seconds
+            nonlocal selected_seconds, selected_source_frames, source_signature
+            nonlocal output_capped, producer_finished
+            delay = _COVER_INCREMENTAL_POLL_SECONDS
+            deadline = loop.time() + _COVER_JOB_TIMEOUT_SECONDS
+            producer_failed_segment: str | None = None
+            try:
+                while loop.time() < deadline + queue_wait_seconds:
+                    job, status, segments, total = await read_and_validate_status()
+                    if total is not None:
+                        output["total"] = total
+                    if status in {"failed", "error", "cancelled", "canceled"}:
+                        detail = job.get("error") or job.get("message")
+                        if not isinstance(detail, str) or not detail.strip():
+                            detail = "翻唱服务处理任务失败"
+                        raise CoverServiceError(f"翻唱服务处理任务失败：{detail.strip()[:200]}")
+
+                    while processed_sequence < len(segments):
+                        item = segments[processed_sequence]
+                        sequence = processed_sequence + 1
+                        expected_start = timeline_seconds
+                        if abs(item["start_seconds"] - expected_start) > 0.005:
+                            raise CoverServiceError(f"翻唱服务第{sequence}段时间轴不连续")
+                        if item["released"]:
+                            raise CoverServiceError(f"翻唱服务第{sequence}段已释放但本地未完成下载")
+                        segment_name = f"segment_{len(final_names) + 1:03d}.wav"
+                        producer_failed_segment = segment_name
+                        ready_at = loop.time()
+                        source_path = pending_dir / f".source-{sequence:04d}.wav"
+                        decoded_dir = pending_dir / f".decoded-{sequence:04d}"
+                        try:
+                            await client.download_segment_audio(job_id, sequence, source_path)
+                            actual_size = source_path.stat().st_size
+                            if actual_size != item["size_bytes"]:
+                                raise CoverServiceError(f"翻唱服务第{sequence}段大小校验失败")
+                            actual_hash = await self._run_thread_safely(self._hash_file, source_path)
+                            if actual_hash != item["sha256"]:
+                                raise CoverServiceError(f"翻唱服务第{sequence}段哈希校验失败")
+                            with wave.open(str(source_path), "rb") as source_audio:
+                                source_params = source_audio.getparams()
+                                source_frames = source_params.nframes
+                                source_rate = source_params.framerate
+                            if (
+                                source_params.comptype != "NONE"
+                                or source_params.nchannels <= 0
+                                or source_params.sampwidth <= 0
+                                or source_rate <= 0
+                                or source_frames <= 0
+                            ):
+                                raise CoverServiceError(f"翻唱服务第{sequence}段源WAV格式无效")
+                            source_actual_duration = source_frames / source_rate
+                            if (
+                                source_actual_duration > float(segment_duration_limit or 0) + 0.001
+                                or abs(source_actual_duration - item["duration_seconds"]) > 0.01
+                            ):
+                                raise CoverServiceError(f"翻唱服务第{sequence}段源时长校验失败")
+                            current_source_signature = (
+                                source_params.nchannels,
+                                source_params.sampwidth,
+                                source_rate,
+                                source_params.comptype,
+                            )
+                            if source_signature is None:
+                                source_signature = current_source_signature
+                            elif source_signature != current_source_signature:
+                                raise CoverServiceError("翻唱服务源分段音频格式发生变化")
+                            decoded_dir.mkdir()
+                            await transcode_and_segment(
+                                source_path,
+                                decoded_dir,
+                                self._required_tool("ffmpeg"),
+                                self._required_tool("ffprobe"),
+                            )
+                            normalized = decoded_dir / "normalized.wav"
+                            normalized_info = self._cover_wav_info(normalized)
+                            if normalized_info is None:
+                                raise AudioError(f"翻唱服务第{sequence}段无法完整解码")
+                            actual_duration = float(normalized_info["duration"])
+                            if (
+                                actual_duration > 60.0
+                                or actual_duration > float(segment_duration_limit or 0) + 0.01
+                                or abs(actual_duration - item["duration_seconds"]) > 0.01
+                            ):
+                                raise CoverServiceError(f"翻唱服务第{sequence}段时长校验失败")
+                            with wave.open(str(normalized), "rb") as audio:
+                                frames = audio.getnframes()
+                                rate = audio.getframerate()
+                            if frames <= 0 or rate != 16_000:
+                                raise AudioError(f"翻唱服务第{sequence}段没有有效采样帧")
+                            remaining_normalized_frames = (
+                                max(0, max_seconds * rate - int(round(selected_seconds * rate)))
+                                if max_seconds
+                                else frames
+                            )
+                            remaining_source_frames = (
+                                max(0, max_seconds * source_rate - selected_source_frames)
+                                if max_seconds
+                                else source_frames
+                            )
+                            selected_frames = min(frames, remaining_normalized_frames)
+                            selected_source_chunk_frames = min(source_frames, remaining_source_frames)
+                            if selected_frames < frames or selected_source_chunk_frames < source_frames:
+                                output_capped = True
+                            if selected_frames > 0 and selected_source_chunk_frames > 0:
+                                if selected_frames == frames:
+                                    normalized.replace(pending_dir / segment_name)
+                                else:
+                                    await self._run_thread_safely(
+                                        self._write_wav_prefix,
+                                        normalized,
+                                        pending_dir / segment_name,
+                                        selected_frames,
+                                    )
+                                source_dir = pending_dir / ".sources"
+                                source_dir.mkdir(exist_ok=True)
+                                source_name = f"source_{len(source_names) + 1:03d}.wav"
+                                await self._run_thread_safely(
+                                    self._write_wav_prefix,
+                                    source_path,
+                                    source_dir / source_name,
+                                    selected_source_chunk_frames,
+                                )
+                                segment_duration = selected_frames / rate
+                                final_names.append(segment_name)
+                                source_names.append(source_name)
+                                selected_source_frames += selected_source_chunk_frames
+                                selected_seconds += segment_duration
+                                output["planned_seconds"] = selected_seconds
+                                output["capped"] = bool(output.get("capped")) or output_capped
+                            acknowledgement = await client.ack_segment(job_id, sequence)
+                            seen_segments[sequence] = {
+                                **item,
+                                "released": acknowledgement["released"],
+                            }
+                            processed_sequence += 1
+                            timeline_seconds = item["start_seconds"] + item["duration_seconds"]
+                            if selected_frames > 0 and selected_source_chunk_frames > 0:
+                                await put_with_heartbeat({
+                                    "name": segment_name,
+                                    "path": pending_dir / segment_name,
+                                    "duration": segment_duration,
+                                    "ready_at": ready_at,
+                                })
+                            producer_failed_segment = None
+                        finally:
+                            source_path.unlink(missing_ok=True)
+                            shutil.rmtree(decoded_dir, ignore_errors=True)
+                        if loop.time() >= deadline + queue_wait_seconds:
+                            raise CoverServiceError("翻唱任务超过 60 分钟")
+
+                    if status in {"completed", "complete", "succeeded"}:
+                        if str(job.get("pipeline_version", "")) != _COVER_PIPELINE_VERSION:
+                            raise CoverServiceError("翻唱服务返回了不兼容的推理结果，请升级至推理管线 v2")
+                        result = job.get("result")
+                        if isinstance(result, dict) and str(result.get("pipeline_version", "")) != _COVER_PIPELINE_VERSION:
+                            raise CoverServiceError("翻唱服务返回了不兼容的推理结果，请升级至推理管线 v2")
+                        if total_segments is None or total_segments <= 0 or processed_sequence != total_segments:
+                            raise CoverServiceError("翻唱任务完成时分段数量不完整")
+                        if len(segments) != total_segments:
+                            raise CoverServiceError("翻唱任务完成时分段清单不完整")
+                        await self._run_thread_safely(
+                            self._merge_incremental_wavs,
+                            pending_dir,
+                            final_names,
+                            source_names,
+                        )
+                        metadata = {
+                            "cache_key": cache_key,
+                            "source_sha256": source_sha256,
+                            "voice_id": voice_id,
+                            "voice_name": str(voice.get("name") or voice_id),
+                            "voice_version": voice_version,
+                            "created_at": utc_now().isoformat(),
+                            "max_seconds": max_seconds,
+                            "pipeline_version": _COVER_PIPELINE_VERSION,
+                            "render_mode": "incremental",
+                            "source_duration": source_duration,
+                            "planned_seconds": selected_seconds,
+                            "capped": bool(max_seconds and source_duration > max_seconds) or output_capped,
+                            "segments": final_names,
+                        }
+                        metadata_temp = pending_dir / ".cover.json.tmp"
+                        metadata_temp.write_text(
+                            json.dumps(metadata, ensure_ascii=False, indent=2),
+                            encoding="utf-8",
+                        )
+                        metadata_temp.replace(pending_dir / "cover.json")
+                        output["total"] = len(final_names)
+                        output["planned_seconds"] = selected_seconds
+                        output["capped"] = metadata["capped"]
+                        producer_finished = True
+                        await put_with_heartbeat(sentinel)
+                        return
+                    if status not in {
+                        "queued", "pending", "running", "processing", "separating",
+                        "converting", "mixing", "segmenting", "streaming",
+                    }:
+                        raise CoverServiceError("翻唱服务返回了未知任务状态")
+                    await asyncio.sleep(delay)
+                    delay = min(2.0, delay + 0.2)
+                raise CoverServiceError("翻唱任务超过 60 分钟")
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                if producer_failed_segment and output.get("failed_segment") is None:
+                    output["failed_segment"] = producer_failed_segment
+                elif output.get("failed_segment") is None and processed_sequence < (total_segments or processed_sequence):
+                    output["failed_segment"] = f"segment_{processed_sequence + 1:03d}.wav"
+                raise
+
+        async def consumer() -> None:
+            nonlocal last_send_succeeded_at
+            while True:
+                item = await queue.get()
+                if item is sentinel:
+                    return
+                due_at = item["ready_at"]
+                if last_send_succeeded_at is not None:
+                    due_at = max(due_at, last_send_succeeded_at + gap_seconds)
+                wait_seconds = due_at - loop.time()
+                if wait_seconds > 0:
+                    await asyncio.sleep(wait_seconds)
+                try:
+                    result = send_audio_callback(item["path"])
+                    if inspect.isawaitable(result):
+                        await result
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    message = str(exc) or exc.__class__.__name__
+                    output["failed_segment"] = item["name"]
+                    output["message"] = f"{item['name']}发送失败：{message[:240]}"
+                    raise RuntimeError(output["message"]) from exc
+                output["sent"] += 1
+                output["sent_seconds"] += item["duration"]
+                last_send_succeeded_at = loop.time()
+
+        producer_task = asyncio.create_task(producer())
+        consumer_task = asyncio.create_task(consumer())
+        committed = False
+        try:
+            done, _pending = await asyncio.wait(
+                {producer_task, consumer_task},
+                return_when=asyncio.FIRST_EXCEPTION,
+            )
+            failures = [task for task in done if not task.cancelled() and task.exception() is not None]
+            if failures:
+                error = failures[0].exception()
+                if consumer_task in failures and producer_finished:
+                    if not producer_task.done():
+                        producer_task.cancel()
+                    await asyncio.gather(producer_task, return_exceptions=True)
+                    producer_error = (
+                        producer_task.exception()
+                        if producer_task.done() and not producer_task.cancelled()
+                        else None
+                    )
+                    if producer_error is None:
+                        _cache, cache_reused = await self._commit_incremental_cover_cache(
+                            pending_dir,
+                            cache_dir,
+                            cache_key=cache_key,
+                            source_sha256=source_sha256,
+                            voice_id=voice_id,
+                            voice_version=voice_version,
+                            max_seconds=max_seconds,
+                        )
+                        committed = True
+                        output["cover_reused"] = cache_reused
+                        output["total"] = len(final_names)
+                        output["message"] = str(error)[:300]
+                        return _cache, cache_reused
+                for task in (producer_task, consumer_task):
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(producer_task, consumer_task, return_exceptions=True)
+                raise error
+
+            await asyncio.gather(producer_task, consumer_task)
+            cache, cache_reused = await self._commit_incremental_cover_cache(
+                pending_dir,
+                cache_dir,
+                cache_key=cache_key,
+                source_sha256=source_sha256,
+                voice_id=voice_id,
+                voice_version=voice_version,
+                max_seconds=max_seconds,
+            )
+            committed = True
+            output["cover_reused"] = cache_reused
+            output["total"] = len(cache["segments"])
+            output["planned_seconds"] = float(cache.get("planned_seconds", 0.0))
+            output["capped"] = cache.get("capped") is True
+            if output.get("failed_segment") is None:
+                output["message"] = "发送完成"
+            return cache, cache_reused
+        except asyncio.CancelledError:
+            for task in (producer_task, consumer_task):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(producer_task, consumer_task, return_exceptions=True)
+            raise
+        finally:
+            if not committed and pending_dir.exists() and not pending_dir.is_symlink():
+                shutil.rmtree(pending_dir, ignore_errors=True)
+
     async def send_cover(
         self,
         song_id: str,
@@ -1125,6 +1788,7 @@ class MusicRuntime:
         voice_id: str,
         max_seconds: int = 0,
         gap_seconds: float = 0,
+        incremental_output: bool = False,
     ) -> dict[str, Any]:
         if not isinstance(max_seconds, int) or isinstance(max_seconds, bool) or max_seconds < 0:
             raise ValueError("max_seconds 必须是非负整数")
@@ -1162,6 +1826,7 @@ class MusicRuntime:
         pinned = False
         client: CoverClient | None = None
         job_id: str | None = None
+        incremental_streamed = False
         try:
             async with self._lock:
                 record = self.storage.get_record(song_id)
@@ -1235,7 +1900,13 @@ class MusicRuntime:
                 max_seconds=max_seconds,
             )
             if cache is None:
-                await client.require_cleanup_support()
+                health = await client.require_cleanup_support()
+                capabilities = health.get("capabilities") if isinstance(health, dict) else None
+                use_incremental = (
+                    incremental_output is True
+                    and isinstance(capabilities, dict)
+                    and capabilities.get("incremental_segments") is True
+                )
                 output["cleanup_confirmed"] = False
                 output["cleanup_warning"] = (
                     "翻唱任务提交状态未确认，无法清理未知编号；服务将按其超时策略清理。"
@@ -1245,29 +1916,51 @@ class MusicRuntime:
                     voice_id=voice_id,
                     max_seconds=max_seconds,
                     request_id=uuid.uuid4().hex,
+                    output_mode="incremental" if use_incremental else None,
                 )
                 output["cleanup_warning"] = ""
-                completed_job = await self._wait_for_cover_job(client, job_id)
-                if (
-                    completed_job.get("voice_id") != voice_id
-                    or completed_job.get("voice_version") != voice_version
-                ):
-                    raise CoverServiceError("翻唱任务使用的音色或版本与已选音色不一致，未缓存该结果")
-                cache, cache_reused = await self._prepare_cover_cache(
-                    client,
-                    job_id,
-                    song_dir,
-                    covers_dir,
-                    cache_dir,
-                    cache_key=cache_key,
-                    source_sha256=source_sha256,
-                    source_duration=source_duration,
-                    voice=voice,
-                    voice_id=voice_id,
-                    voice_version=voice_version,
-                    max_seconds=max_seconds,
-                )
-                output["cover_reused"] = cache_reused
+                if use_incremental:
+                    incremental_streamed = True
+                    cache, cache_reused = await self._stream_incremental_cover(
+                        client,
+                        job_id,
+                        song_dir,
+                        covers_dir,
+                        cache_dir,
+                        send_audio_callback,
+                        output,
+                        cache_key=cache_key,
+                        source_sha256=source_sha256,
+                        source_duration=source_duration,
+                        voice=voice,
+                        voice_id=voice_id,
+                        voice_version=voice_version,
+                        max_seconds=max_seconds,
+                        gap_seconds=numeric_gap,
+                    )
+                    output["cover_reused"] = cache_reused
+                else:
+                    completed_job = await self._wait_for_cover_job(client, job_id)
+                    if (
+                        completed_job.get("voice_id") != voice_id
+                        or completed_job.get("voice_version") != voice_version
+                    ):
+                        raise CoverServiceError("翻唱任务使用的音色或版本与已选音色不一致，未缓存该结果")
+                    cache, cache_reused = await self._prepare_cover_cache(
+                        client,
+                        job_id,
+                        song_dir,
+                        covers_dir,
+                        cache_dir,
+                        cache_key=cache_key,
+                        source_sha256=source_sha256,
+                        source_duration=source_duration,
+                        voice=voice,
+                        voice_id=voice_id,
+                        voice_version=voice_version,
+                        max_seconds=max_seconds,
+                    )
+                    output["cover_reused"] = cache_reused
                 try:
                     release = await client.ack_job(job_id)
                     job_id = None
@@ -1291,6 +1984,14 @@ class MusicRuntime:
             output["total"] = len(cache["segments"])
             output["planned_seconds"] = float(cache.get("planned_seconds", 0.0))
             output["capped"] = cache.get("capped") is True
+
+            if incremental_streamed:
+                token = str((settings_snapshot.get("cover_service") or {}).get("token") or "")
+                if token and output.get("message"):
+                    output["message"] = str(output["message"]).replace(token, "[hidden]")[:300]
+                if not output.get("message"):
+                    output["message"] = "发送完成"
+                return output
 
             for index, (filename, duration) in enumerate(
                 zip(cache["segments"], cache["segment_durations"]), start=1

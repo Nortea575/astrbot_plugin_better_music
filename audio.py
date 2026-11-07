@@ -15,6 +15,16 @@ class AudioError(RuntimeError):
     pass
 
 
+def wav_duration(path: Path) -> float | None:
+    """Return the playback duration of a WAV file when its header is readable."""
+    try:
+        with wave.open(str(path), "rb") as audio:
+            rate = audio.getframerate()
+            return audio.getnframes() / rate if rate > 0 else None
+    except (OSError, EOFError, wave.Error):
+        return None
+
+
 def _creation_flags() -> int:
     return getattr(subprocess, "CREATE_NO_WINDOW", 0)
 

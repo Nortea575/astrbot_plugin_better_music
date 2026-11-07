@@ -7,12 +7,13 @@ import copy
 import inspect
 import json
 import time
-import wave
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from .audio import wav_duration as _wav_duration
 from .providers import PLATFORMS
+from .quota import CHECKER_FAILURE, QuotaReservation, scope_from_event
 from .templates import DEFAULT_TEMPLATES, REPLY_ENABLED_DEFAULTS, render_template, validate_templates
 
 
@@ -189,6 +190,7 @@ class ActiveMusicController:
             "voice_id": voice_id,
             "max_seconds": max_seconds,
             "gap_seconds": gap_seconds,
+            "incremental_output": playback.get("incremental_output") is True,
         }
 
     async def _scope(self, event: Any) -> tuple[str, str, str] | None:
@@ -315,8 +317,10 @@ class ActiveMusicController:
         scope = await self._scope(event)
         if scope is None:
             return self._sing_result("rejected", "无法确认当前会话和用户，请在当前对话中重新搜索歌曲。")
+        if not await self._scope_is_current(scope):
+            return self._sing_result("rejected", "当前对话已切换，请在新对话中重新搜索歌曲。")
         async with self._lock:
-            if self._closed:
+            if self._closed or not self.active_config()[0]:
                 return self._sing_result("rejected", "主动演唱插件正在卸载，本次任务没有启动。")
             now = time.monotonic()
             self._prune_locked(now)
@@ -344,39 +348,100 @@ class ActiveMusicController:
                 if in_flight and in_flight.get("candidate_id") == handle:
                     return self._queued_text(in_flight, duplicate=True)
                 return self._sing_result("rejected", "当前对话已有一首歌曲正在处理，完成后再提交下一首。")
+
+        quota_getter = getattr(self.plugin, "get_music_quota_api", None)
+        quota_api = quota_getter() if callable(quota_getter) else getattr(self.plugin, "music_quota", None)
+        reservation: QuotaReservation | None = None
+        if quota_api is not None:
+            try:
+                reservation, reason = await quota_api.reserve(
+                    scope[0],
+                    source="active_llm",
+                    kind="cover",
+                    actor_id=scope[2],
+                    scope=scope_from_event(event),
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                reservation, reason = None, CHECKER_FAILURE
+            if reservation is None:
+                return self._sing_result("rejected", reason or CHECKER_FAILURE)
+
+        try:
+            if self._closed or not self._is_active():
+                return self._sing_result("rejected", "主动演唱模式已关闭，本次任务没有启动。")
             if not await self._scope_is_current(scope):
                 return self._sing_result("rejected", "当前对话已切换，请在新对话中重新搜索歌曲。")
-            job_id = uuid4().hex
-            job = {
-                "job_id": job_id,
-                "scope": scope,
-                "candidate_id": handle,
-                "candidate": dict(candidate),
-                "platform": selection_set["platform"],
-                "voice_id": playback["voice_id"],
-                "max_seconds": playback["max_seconds"],
-                "gap_seconds": playback["gap_seconds"],
-                "event": event,
-                "status": "queued",
-                "message": "任务已排队",
-                "sent": 0,
-                "total": 0,
-                "sent_seconds": 0.0,
-                "created_at": now,
-                "updated_at": now,
-            }
-            self._jobs[job_id] = job
-            self._inflight[conversation_scope] = job_id
-            self._candidate_jobs[job_key] = (
-                job_id, now + ACTIVE_JOB_RETENTION_SECONDS
-            )
-            recent = self._recent.setdefault(conversation_scope, [])
-            recent.append(job_id)
-            del recent[:-MAX_ACTIVE_JOBS_PER_SCOPE]
-            task = asyncio.create_task(self._run_job(job))
-            self._tasks.add(task)
-            task.add_done_callback(self._tasks.discard)
-        return self._queued_text(job)
+            async with self._lock:
+                if self._closed or not self._is_active():
+                    return self._sing_result("rejected", "主动演唱模式已关闭，本次任务没有启动。")
+                now = time.monotonic()
+                self._prune_locked(now)
+                job_key = (scope, handle)
+                existing = self._candidate_jobs.get(job_key)
+                if existing is not None:
+                    existing_job = self._jobs.get(existing[0])
+                    if existing_job is not None:
+                        return self._queued_text(existing_job, duplicate=True)
+                selection_set = self._selections.get(scope)
+                candidate = (
+                    selection_set.get("candidates", {}).get(handle)
+                    if selection_set and selection_set.get("expires_at", 0) > now
+                    else None
+                )
+                if candidate is None:
+                    return self._sing_result("rejected", "这个候选不属于当前用户和对话，或已过期；请重新搜索。")
+                playback = self.active_config()[1]
+                if not playback["voice_id"]:
+                    return self._sing_result("rejected", "主动演唱音色已清除，请重新选择音色。")
+                in_flight_id = self._inflight.get(conversation_scope)
+                if in_flight_id is not None:
+                    in_flight = self._jobs.get(in_flight_id)
+                    if in_flight and in_flight.get("candidate_id") == handle:
+                        return self._queued_text(in_flight, duplicate=True)
+                    return self._sing_result("rejected", "当前对话已有一首歌曲正在处理，完成后再提交下一首。")
+                if not await self._scope_is_current(scope):
+                    return self._sing_result("rejected", "当前对话已切换，请在新对话中重新搜索歌曲。")
+                if self._closed or not self._is_active():
+                    return self._sing_result("rejected", "主动演唱模式已关闭，本次任务没有启动。")
+                job_id = uuid4().hex
+                job = {
+                    "job_id": job_id,
+                    "scope": scope,
+                    "candidate_id": handle,
+                    "candidate": dict(candidate),
+                    "platform": selection_set["platform"],
+                    "voice_id": playback["voice_id"],
+                    "max_seconds": playback["max_seconds"],
+                    "gap_seconds": playback["gap_seconds"],
+                    "incremental_output": playback["incremental_output"],
+                    "event": event,
+                    "status": "queued",
+                    "message": "任务已排队",
+                    "sent": 0,
+                    "total": 0,
+                    "sent_seconds": 0.0,
+                    "created_at": now,
+                    "updated_at": now,
+                    "quota_reservation": reservation,
+                }
+                self._jobs[job_id] = job
+                self._inflight[conversation_scope] = job_id
+                self._candidate_jobs[job_key] = (
+                    job_id, now + ACTIVE_JOB_RETENTION_SECONDS
+                )
+                recent = self._recent.setdefault(conversation_scope, [])
+                recent.append(job_id)
+                del recent[:-MAX_ACTIVE_JOBS_PER_SCOPE]
+                task = asyncio.create_task(self._run_job(job))
+                self._tasks.add(task)
+                task.add_done_callback(self._tasks.discard)
+                reservation = None
+            return self._queued_text(job)
+        finally:
+            if reservation is not None:
+                await reservation.release()
 
     def _is_active(self) -> bool:
         return not self._closed and self.active_config()[0]
@@ -433,6 +498,14 @@ class ActiveMusicController:
                     outcome = await outcome
                 if outcome is False:
                     raise RuntimeError("AstrBot未发送语音消息")
+                reservation = job.get("quota_reservation")
+                if reservation is not None:
+                    try:
+                        await reservation.confirm()
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        self._logger().exception("保存主动演唱额度失败，继续处理已成功发送的语音。")
                 sent_by_callback += 1
                 job["sent"] = sent_by_callback
                 duration = _wav_duration(path)
@@ -451,6 +524,7 @@ class ActiveMusicController:
                 voice_id=job["voice_id"],
                 max_seconds=job["max_seconds"],
                 gap_seconds=job["gap_seconds"],
+                incremental_output=job["incremental_output"],
             )
             if not isinstance(result, dict):
                 raise RuntimeError("翻唱发送任务返回格式无效")
@@ -548,6 +622,12 @@ class ActiveMusicController:
             if await self._can_send(job):
                 await self._notify_failure(job, str(exc))
         finally:
+            reservation = job.get("quota_reservation")
+            if reservation is not None:
+                try:
+                    await reservation.release()
+                except Exception:
+                    self._logger().exception("释放主动演唱额度预占失败。")
             try:
                 await self._send_job_song_log(
                     job,
@@ -731,6 +811,13 @@ class ActiveMusicController:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._tasks.clear()
+        for job in self._jobs.values():
+            reservation = job.get("quota_reservation")
+            if reservation is not None:
+                try:
+                    await reservation.release()
+                except Exception:
+                    self._logger().exception("卸载时释放主动演唱额度预占失败。")
 
     def _prune_locked(self, now: float) -> None:
         expired_scopes = [
@@ -873,15 +960,6 @@ class ActiveMusicController:
         job["message"] = _bounded_text(message, 500)
         job["updated_at"] = time.monotonic()
 
-    @staticmethod
-    def _format_duration(value: Any) -> str:
-        try:
-            seconds = max(0, int(float(value or 0)))
-        except (TypeError, ValueError, OverflowError):
-            seconds = 0
-        return f"{seconds // 60}:{seconds % 60:02d}" if seconds else "未知"
-
-
 def _bounded_text(value: Any, limit: int) -> str:
     return str(value or "").strip()[:limit]
 
@@ -910,10 +988,3 @@ def _optional_nonnegative(value: Any) -> float | None:
     return numeric if _finite_number(numeric) and numeric >= 0 else None
 
 
-def _wav_duration(path: Path) -> float | None:
-    try:
-        with wave.open(str(path), "rb") as audio:
-            rate = audio.getframerate()
-            return audio.getnframes() / rate if rate > 0 else None
-    except (OSError, EOFError, wave.Error):
-        return None

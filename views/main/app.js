@@ -79,6 +79,7 @@ const elements = {
   fileQuery: document.getElementById("file-query"),
   settingsForm: document.getElementById("settings-form"),
   settingsStatus: document.getElementById("settings-status"),
+  settingsTabs: document.getElementById("settings-tabs"),
   textSettingsForm: document.getElementById("text-settings-form"),
   textSettingsStatus: document.getElementById("text-settings-status"),
   templateCategoryTabs: document.getElementById("template-category-tabs"),
@@ -88,6 +89,8 @@ const elements = {
   passiveMaxSeconds: document.getElementById("passive-max-seconds"),
   passiveGapSeconds: document.getElementById("passive-gap-seconds"),
   activeVoice: document.getElementById("active-voice-id"),
+  activeIncrementalOutput: document.getElementById("active-incremental-output"),
+  activeIncrementalCapability: document.getElementById("active-incremental-capability"),
   activeMaxSeconds: document.getElementById("active-max-seconds"),
   activeGapSeconds: document.getElementById("active-gap-seconds"),
   songLogEnabled: document.getElementById("song-log-enabled"),
@@ -115,6 +118,7 @@ let currentEnvironment = null;
 let activeProvider = "netease";
 let activeMainTab = "environment";
 let activeEnvironmentCategory = "normal";
+let activeSettingsTab = "passive";
 let activeTemplateCategory = "menu";
 const loginPollers = new Map();
 const requestIds = new Map();
@@ -357,6 +361,7 @@ function renderPluginSettings(settings = {}, force = false) {
   elements.activeGapSeconds.value = String(Number.isFinite(activePlayback.gap_seconds) && activePlayback.gap_seconds >= 0
     ? activePlayback.gap_seconds
     : 0);
+  elements.activeIncrementalOutput.checked = activePlayback.incremental_output === true;
   const songLog = settings.song_log || {};
   elements.songLogEnabled.checked = songLog.enabled === true;
   renderSongLogTargets(currentOverview?.targets || [], typeof songLog.platform_id === "string" ? songLog.platform_id : "");
@@ -586,10 +591,11 @@ function keepTabInView(container, tab) {
   const leftEdge = containerRect.left + container.clientLeft + 4;
   const rightEdge = containerRect.left + container.clientLeft + container.clientWidth - 4;
   const tabRect = tab.getBoundingClientRect();
+  const behavior = window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth";
   if (tabRect.left < leftEdge) {
-    container.scrollBy({ left: tabRect.left - leftEdge, behavior: "smooth" });
+    container.scrollBy({ left: tabRect.left - leftEdge, behavior });
   } else if (tabRect.right > rightEdge) {
-    container.scrollBy({ left: tabRect.right - rightEdge, behavior: "smooth" });
+    container.scrollBy({ left: tabRect.right - rightEdge, behavior });
   }
 }
 
@@ -655,6 +661,73 @@ function setActiveEnvironmentTab(categoryId) {
     requestAnimationFrame(() => {
       document.querySelector(`[data-environment-panel="${categoryId}"]`)?.classList.add("is-animating");
     });
+  }
+}
+
+function setActiveSettingsTab(tabId) {
+  const tabs = [...elements.settingsTabs.querySelectorAll("[data-settings-tab]")];
+  const activeTab = tabs.find((tab) => tab.dataset.settingsTab === tabId);
+  if (!activeTab) return;
+  const changed = activeSettingsTab !== tabId;
+  activeSettingsTab = tabId;
+  const panels = [...elements.settingsForm.querySelectorAll("[data-settings-panel]")];
+  panels.forEach((panel) => panel.classList.remove("is-animating"));
+  for (const tab of tabs) {
+    const active = tab.dataset.settingsTab === tabId;
+    tab.setAttribute("aria-selected", String(active));
+    tab.tabIndex = active ? 0 : -1;
+    const panel = panels.find((item) => item.dataset.settingsPanel === tab.dataset.settingsTab);
+    if (!panel) continue;
+    panel.hidden = !active;
+    panel.classList.toggle("is-active", active);
+  }
+  keepTabInView(elements.settingsTabs, activeTab);
+  if (changed && document.documentElement.dataset.viewReady === "true") {
+    requestAnimationFrame(() => {
+      elements.settingsForm.querySelector(`[data-settings-panel="${tabId}"]`)?.classList.add("is-animating");
+    });
+  }
+}
+
+function focusPluginSetting(fieldId) {
+  const field = document.getElementById(fieldId);
+  const panel = field?.closest("[data-settings-panel]");
+  if (!field || !panel) return;
+  setActiveSettingsTab(panel.dataset.settingsPanel);
+  field.setAttribute("aria-invalid", "true");
+  requestAnimationFrame(() => {
+    field.scrollIntoView({ block: "nearest" });
+    field.focus();
+  });
+}
+
+function focusFieldForSettingsError(message = "") {
+  if (/歌曲总数|max_songs/.test(message)) return "max-songs";
+  if (/边生成|分段处理|incremental_output|active_playback/.test(message)) return "active-incremental-output";
+  if (/被动.*最长/.test(message)) return "passive-max-seconds";
+  if (/被动.*间隔/.test(message)) return "passive-gap-seconds";
+  if (/被动|passive_playback/.test(message)) return "passive-llm";
+  if (/主动.*音色/.test(message)) return "active-voice-id";
+  if (/主动.*最长/.test(message)) return "active-max-seconds";
+  if (/主动.*间隔/.test(message)) return "active-gap-seconds";
+  if (/翻唱|cover_service/.test(message)) return "cover-service-url";
+  if (/点歌日志/.test(message)) {
+    return /平台实例|平台.*可用/.test(message) ? "song-log-platform" : "song-log-target-id";
+  }
+  return "";
+}
+
+function updateIncrementalCapability(health = null) {
+  const supported = health?.capabilities?.incremental_segments;
+  if (supported === true) {
+    elements.activeIncrementalCapability.textContent = "当前翻唱服务支持分段处理。";
+    elements.activeIncrementalCapability.dataset.kind = "success";
+  } else if (supported === false) {
+    elements.activeIncrementalCapability.textContent = "当前翻唱服务不支持分段处理；此开关会保留，翻唱继续整首流程。";
+    elements.activeIncrementalCapability.dataset.kind = "warning";
+  } else {
+    elements.activeIncrementalCapability.textContent = "尚未确认翻唱服务的分段处理能力。此开关仍会按当前选择保存。";
+    elements.activeIncrementalCapability.dataset.kind = "info";
   }
 }
 
@@ -818,17 +891,35 @@ function pluginSettingsPayload() {
   if (!currentOverview?.settings) throw new Error("插件设置仍在读取，请稍后再保存。 ");
   const maxSongs = Number(elements.maxSongs.value);
   if (!Number.isSafeInteger(maxSongs) || maxSongs < 1) {
-    throw new Error("歌曲总数上限必须是正整数。 ");
+    const error = new Error("歌曲总数上限必须是正整数。");
+    error.fieldId = "max-songs";
+    throw error;
   }
   const nonnegative = (input, label, integer = false) => {
     const raw = input.value.trim();
     const value = Number(raw);
     if (!raw || !Number.isFinite(value) || value < 0 || (integer && !Number.isSafeInteger(value))) {
-      throw new Error(`${label}必须是${integer ? "非负整数" : "非负有限数"}。`);
+      const error = new Error(`${label}必须是${integer ? "非负整数" : "非负有限数"}。`);
+      error.fieldId = input.id;
+      throw error;
     }
     return value;
   };
-  const coverService = { url: elements.coverServiceUrl.value.trim() };
+  const serviceUrl = elements.coverServiceUrl.value.trim();
+  if (serviceUrl) {
+    let parsed;
+    try { parsed = new URL(serviceUrl); } catch {
+      const error = new Error("翻唱服务 URL 必须是有效的 HTTP 或 HTTPS 地址。");
+      error.fieldId = "cover-service-url";
+      throw error;
+    }
+    if (!["http:", "https:"].includes(parsed.protocol) || !parsed.hostname) {
+      const error = new Error("翻唱服务 URL 必须是有效的 HTTP 或 HTTPS 地址。");
+      error.fieldId = "cover-service-url";
+      throw error;
+    }
+  }
+  const coverService = { url: serviceUrl };
   if (elements.coverClearToken.checked) coverService.token = "";
   else if (elements.coverServiceToken.value !== "") coverService.token = elements.coverServiceToken.value;
   const songLog = {
@@ -839,13 +930,19 @@ function pluginSettingsPayload() {
   };
   if (songLog.enabled) {
     if (!songLog.platform_id || !songLog.target_id) {
-      throw new Error("启用点歌日志时，请选择平台实例并填写私聊或群聊 ID。");
+      const error = new Error("启用点歌日志时，请选择平台实例并填写私聊或群聊 ID。");
+      error.fieldId = songLog.platform_id ? "song-log-target-id" : "song-log-platform";
+      throw error;
     }
     if (!["private", "group"].includes(songLog.target_type)) {
-      throw new Error("点歌日志会话类型必须是私聊或群聊。");
+      const error = new Error("点歌日志会话类型必须是私聊或群聊。");
+      error.fieldId = "song-log-target-type";
+      throw error;
     }
     if (!currentOverview?.targets?.some((target) => target.id === songLog.platform_id)) {
-      throw new Error("点歌日志平台实例已不可用，请重新选择当前目标列表中的实例。");
+      const error = new Error("点歌日志平台实例已不可用，请重新选择当前目标列表中的实例。");
+      error.fieldId = "song-log-platform";
+      throw error;
     }
   }
   return {
@@ -860,6 +957,7 @@ function pluginSettingsPayload() {
       voice_id: elements.activeVoice.value,
       max_seconds: nonnegative(elements.activeMaxSeconds, "主动最长演唱时间", true),
       gap_seconds: nonnegative(elements.activeGapSeconds, "主动分段发送间隔"),
+      incremental_output: elements.activeIncrementalOutput.checked === true,
     },
     song_log: songLog,
     cover_service: coverService,
@@ -930,7 +1028,10 @@ async function savePluginSettings(event) {
     const busyNote = skipped ? `另有 ${skipped} 首歌曲正被使用，稍后才可清理。` : "";
     setStatus(elements.settingsStatus, `插件设置已保存。${cleanupNote}${busyNote}`, skipped ? "warning" : "success");
   } catch (error) {
-    setStatus(elements.settingsStatus, error.message || "保存插件设置失败。", "error");
+    const message = error.message || "保存插件设置失败。";
+    const fieldId = error.fieldId || focusFieldForSettingsError(message);
+    if (fieldId) focusPluginSetting(fieldId);
+    setStatus(elements.settingsStatus, message, "error");
   } finally {
     buttonBusy(button, false);
   }
@@ -999,6 +1100,7 @@ async function checkCoverService(button = elements.coverCheck) {
   try {
     const result = await apiPost("cover/check", {});
     const health = result?.health || {};
+    updateIncrementalCapability(health);
     const voices = Array.isArray(result?.voices) ? result.voices : [];
     coverServiceTestBlockMessage = health.ready === true && isCoverServiceV2Compatible(health)
       ? ""
@@ -1014,6 +1116,7 @@ async function checkCoverService(button = elements.coverCheck) {
       health.ready === true && isCoverServiceV2Compatible(health) ? "success" : "warning",
     );
   } catch (error) {
+    updateIncrementalCapability();
     coverServiceTestBlockMessage = "无法确认翻唱服务版本，请先检查服务后再运行短片段推理。";
     updateCoverTestAvailability();
     renderCoverHealthChecks({});
@@ -1882,6 +1985,24 @@ function installEventHandlers() {
     });
   }
 
+  const settingsTabButtons = [...elements.settingsTabs.querySelectorAll("[data-settings-tab]")];
+  for (const tab of settingsTabButtons) {
+    tab.addEventListener("click", () => setActiveSettingsTab(tab.dataset.settingsTab));
+    tab.addEventListener("keydown", (event) => {
+      if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+      event.preventDefault();
+      const index = settingsTabButtons.findIndex((item) => item.dataset.settingsTab === activeSettingsTab);
+      let next = index;
+      if (event.key === "ArrowRight") next = (index + 1) % settingsTabButtons.length;
+      if (event.key === "ArrowLeft") next = (index - 1 + settingsTabButtons.length) % settingsTabButtons.length;
+      if (event.key === "Home") next = 0;
+      if (event.key === "End") next = settingsTabButtons.length - 1;
+      const nextTab = settingsTabButtons[next];
+      setActiveSettingsTab(nextTab.dataset.settingsTab);
+      nextTab.focus();
+    });
+  }
+
   const environmentTabButtons = [...elements.environmentTabs.querySelectorAll("[data-environment-tab]")];
   for (const tab of environmentTabButtons) {
     tab.addEventListener("click", () => setActiveEnvironmentTab(tab.dataset.environmentTab));
@@ -2011,6 +2132,12 @@ function installEventHandlers() {
     elements.settingsForm.dataset.dirty = "true";
     syncPlaybackAvailability();
   });
+  elements.settingsForm.addEventListener("input", (event) => {
+    event.target.removeAttribute?.("aria-invalid");
+  });
+  elements.settingsForm.addEventListener("change", (event) => {
+    event.target.removeAttribute?.("aria-invalid");
+  });
   elements.coverServiceUrl.addEventListener("input", () => { coverServiceDirty = true; });
   elements.coverServiceToken.addEventListener("input", () => {
     coverServiceDirty = true;
@@ -2059,6 +2186,7 @@ async function start() {
   installEventHandlers();
   setActiveMainTab("environment");
   setActiveEnvironmentTab("normal");
+  setActiveSettingsTab("passive");
   try {
     if (!bridge) throw new Error("AstrBot 页面接口未就绪，请刷新页面。");
     const context = await bridge.ready();
