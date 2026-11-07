@@ -1,0 +1,17 @@
+# Runtime and user data
+/data/
+/downloads/
+/runtime/
+/cover_service/
+/models/
+/venv/
+/venvs/
+/.venv/
+/logs/
+/log/
+*.log
+*.log.*
+.env
+.env.*
+__pycache__/
+*.py[cod]

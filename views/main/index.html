@@ -1,0 +1,421 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>更好的点歌</title>
+    <link rel="stylesheet" href="./style.css" />
+    <script type="module" src="./app.js"></script>
+  </head>
+  <body>
+    <main class="page" aria-label="更好的点歌">
+      <header class="page-heading">
+        <h1>更好的点歌</h1>
+        <p>按需查看环境、登录账号、音乐文件、文本和插件设置。</p>
+      </header>
+
+      <p class="notice" id="page-status" role="status" aria-live="polite">正在读取插件状态…</p>
+
+      <nav class="main-navigation" aria-label="插件管理">
+        <div class="main-tabs" role="tablist" aria-label="管理页面">
+          <button id="main-tab-environment" class="main-tab" type="button" role="tab" aria-controls="main-panel-environment" aria-selected="true" tabindex="0" data-main-tab="environment">环境监测</button>
+          <button id="main-tab-login" class="main-tab" type="button" role="tab" aria-controls="main-panel-login" aria-selected="false" tabindex="-1" data-main-tab="login">聚合登录</button>
+          <button id="main-tab-files" class="main-tab" type="button" role="tab" aria-controls="main-panel-files" aria-selected="false" tabindex="-1" data-main-tab="files">文件管理</button>
+          <button id="main-tab-text-settings" class="main-tab" type="button" role="tab" aria-controls="main-panel-text-settings" aria-selected="false" tabindex="-1" data-main-tab="text-settings">文本设置</button>
+          <button id="main-tab-settings" class="main-tab" type="button" role="tab" aria-controls="main-panel-settings" aria-selected="false" tabindex="-1" data-main-tab="settings">插件设置</button>
+        </div>
+        <span id="main-tab-indicator" class="main-tab-indicator" aria-hidden="true"></span>
+      </nav>
+
+      <section id="main-panel-environment" class="panel main-panel is-active" role="tabpanel" aria-labelledby="main-tab-environment" data-main-panel="environment" tabindex="0">
+        <div class="environment-tabs provider-tabs" role="tablist" aria-label="环境监测内容">
+          <button id="environment-tab-normal" class="tab-button" type="button" role="tab" aria-controls="environment-panel-normal" aria-selected="true" tabindex="0" data-environment-tab="normal">普通点歌</button>
+          <button id="environment-tab-cover" class="tab-button" type="button" role="tab" aria-controls="environment-panel-cover" aria-selected="false" tabindex="-1" data-environment-tab="cover">翻唱服务</button>
+        </div>
+
+        <section id="environment-panel-normal" class="environment-panel is-active" role="tabpanel" aria-labelledby="environment-tab-normal" data-environment-panel="normal">
+        <section class="subsection" aria-labelledby="environment-title">
+          <div class="subsection-heading">
+            <div>
+              <h2 id="environment-title">环境检测</h2>
+              <p class="helper-text">手动检查本机音频工具和音乐平台依赖状态。</p>
+            </div>
+            <button class="button quiet small" id="refresh-overview" type="button">检测环境</button>
+          </div>
+          <ul class="check-list" id="environment-checks" aria-live="polite"></ul>
+        </section>
+
+        <section class="subsection" aria-labelledby="tool-install-title">
+          <div class="subsection-heading">
+            <div>
+              <h2 id="tool-install-title">依赖补充</h2>
+              <p class="helper-text">可填写自定义下载地址，再补充单项或全部缺失工具。</p>
+            </div>
+          </div>
+          <div class="tool-list" id="tool-list" aria-label="工具与依赖"></div>
+          <div class="settings-actions">
+            <button class="button quiet" id="save-tool-urls" type="button">保存自定义下载地址</button>
+            <button class="button primary" id="install-missing" type="button">补充全部缺失工具</button>
+          </div>
+          <p class="inline-status" id="tool-status" role="status" aria-live="polite"></p>
+        </section>
+
+        <section class="subsection" aria-labelledby="test-target-title">
+          <div class="subsection-heading">
+            <div>
+              <h2 id="test-target-title">分段发送测试</h2>
+              <p class="helper-text">手动选择目标后，会合成约 65 秒的提示音并分段发送，用于验证语音分段发送。</p>
+            </div>
+          </div>
+          <form id="test-form" class="form-grid">
+            <label class="field">
+              <span>平台实例</span>
+              <select id="target-platform" name="platform_id" required></select>
+            </label>
+            <label class="field">
+              <span>会话类型</span>
+              <select id="target-type" name="target_type">
+                <option value="private">私聊</option>
+                <option value="group">群聊</option>
+              </select>
+            </label>
+            <label class="field">
+              <span id="target-id-label">私聊 ID</span>
+              <input id="target-id" name="target_id" type="text" maxlength="128" autocomplete="off" placeholder="输入接收方 ID" required />
+            </label>
+            <button class="button primary form-submit" id="test-submit" type="submit">发送 65 秒合成提示音</button>
+          </form>
+          <p class="inline-status" id="test-status" role="status" aria-live="polite"></p>
+        </section>
+        </section>
+
+        <section id="environment-panel-cover" class="environment-panel" role="tabpanel" aria-labelledby="environment-tab-cover" data-environment-panel="cover" hidden>
+          <section class="subsection" aria-labelledby="cover-resource-title">
+            <div class="subsection-heading">
+              <div>
+                <h2 id="cover-resource-title">资源连通检查</h2>
+                <p class="helper-text">读取服务健康状态和可用音色；兼容状态以 pipeline v2 及任务能力检查为准。</p>
+              </div>
+              <div class="cover-resource-actions">
+                <button class="button quiet small" id="cover-guide-download" type="button">翻唱服务接入与接口说明</button>
+                <button class="button quiet small" id="cover-check" type="button">检查资源与音色</button>
+              </div>
+            </div>
+            <p class="inline-status" id="cover-service-status" role="status" aria-live="polite"></p>
+            <ul class="check-list" id="cover-health-checks" aria-live="polite" hidden></ul>
+          </section>
+
+          <section class="subsection" aria-labelledby="cover-test-title">
+            <div class="subsection-heading">
+              <div>
+                <h2 id="cover-test-title">真实短片段测试</h2>
+                <p class="helper-text">选择已下载源歌和音色后运行一次推理；结果仅显示在此页，不会发送 QQ 消息，也不会新增歌曲记录。</p>
+              </div>
+            </div>
+            <form id="cover-test-form" class="form-grid cover-test-form">
+              <label class="field" for="cover-test-platform">
+                <span>源歌平台</span>
+                <select id="cover-test-platform" name="platform">
+                  <option value="netease">网易云音乐</option>
+                  <option value="qq">QQ音乐</option>
+                  <option value="kugou">酷狗音乐</option>
+                </select>
+              </label>
+              <label class="field" for="cover-test-song">
+                <span>已下载源歌</span>
+                <select id="cover-test-song" name="song_id" required>
+                  <option value="">读取中…</option>
+                </select>
+              </label>
+              <label class="field" for="cover-test-voice">
+                <span>翻唱音色</span>
+                <select id="cover-test-voice" name="voice_id" required>
+                  <option value="">先检查服务并读取音色</option>
+                </select>
+              </label>
+              <button class="button primary form-submit" id="cover-test-submit" type="submit" disabled>运行短片段推理</button>
+            </form>
+            <p class="inline-status" id="cover-test-status" role="status" aria-live="polite"></p>
+            <section class="cover-test-result" id="cover-test-result" aria-labelledby="cover-test-result-title" hidden>
+              <h3 id="cover-test-result-title">测试结果</h3>
+              <dl id="cover-test-result-details" class="cover-test-result-details"></dl>
+              <ul id="cover-test-segments" class="cover-test-segments" hidden></ul>
+              <p class="helper-text" id="cover-test-result-message"></p>
+            </section>
+          </section>
+        </section>
+      </section>
+
+      <section id="main-panel-login" class="panel main-panel" role="tabpanel" aria-labelledby="main-tab-login" data-main-panel="login" tabindex="0" hidden>
+        <div class="section-heading">
+          <h2>聚合登录</h2>
+          <p>点击开始登录后获取二维码；二维码失效时请手动重新申请。</p>
+        </div>
+        <div class="provider-tabs" role="tablist" aria-label="音乐平台">
+          <button id="tab-netease" class="tab-button" type="button" role="tab" aria-controls="provider-netease" aria-selected="true" tabindex="0" data-provider-tab="netease">网易云音乐</button>
+          <button id="tab-qq" class="tab-button" type="button" role="tab" aria-controls="provider-qq" aria-selected="false" tabindex="-1" data-provider-tab="qq">QQ音乐</button>
+          <button id="tab-kugou" class="tab-button" type="button" role="tab" aria-controls="provider-kugou" aria-selected="false" tabindex="-1" data-provider-tab="kugou">酷狗音乐</button>
+        </div>
+        <div class="provider-panels">
+          <article id="provider-netease" class="provider-panel" role="tabpanel" aria-labelledby="tab-netease" data-provider-panel="netease">
+            <div class="account-summary" id="account-netease"></div>
+            <div class="login-actions">
+              <button class="button primary" type="button" data-login-start="netease">开始登录</button>
+              <button class="button quiet" type="button" data-login-cancel="netease" hidden>取消</button>
+              <button class="button quiet" type="button" data-login-logout="netease" hidden>退出登录</button>
+            </div>
+            <p class="inline-status" id="login-status-netease" aria-live="polite"></p>
+            <figure class="qr-view" id="qr-view-netease" data-qr-alt="网易云音乐登录二维码" hidden>
+              <figcaption>使用网易云音乐 App 扫码；此页面不会自动重新申请二维码。</figcaption>
+            </figure>
+          </article>
+          <article id="provider-qq" class="provider-panel" role="tabpanel" aria-labelledby="tab-qq" data-provider-panel="qq" hidden>
+            <div class="account-summary" id="account-qq"></div>
+            <div class="login-actions">
+              <button class="button primary" type="button" data-login-start="qq">开始登录</button>
+              <button class="button quiet" type="button" data-login-cancel="qq" hidden>取消</button>
+              <button class="button quiet" type="button" data-login-logout="qq" hidden>退出登录</button>
+            </div>
+            <p class="inline-status" id="login-status-qq" aria-live="polite"></p>
+            <figure class="qr-view" id="qr-view-qq" data-qr-alt="QQ音乐登录二维码" hidden>
+              <figcaption>使用 QQ 音乐 App 扫码；此页面不会自动重新申请二维码。</figcaption>
+            </figure>
+          </article>
+          <article id="provider-kugou" class="provider-panel" role="tabpanel" aria-labelledby="tab-kugou" data-provider-panel="kugou" hidden>
+            <div class="account-summary" id="account-kugou"></div>
+            <div class="login-actions">
+              <button class="button primary" type="button" data-login-start="kugou">开始登录</button>
+              <button class="button quiet" type="button" data-login-cancel="kugou" hidden>取消</button>
+              <button class="button quiet" type="button" data-login-logout="kugou" hidden>退出登录</button>
+            </div>
+            <p class="inline-status" id="login-status-kugou" aria-live="polite"></p>
+            <figure class="qr-view" id="qr-view-kugou" data-qr-alt="酷狗音乐登录二维码" hidden>
+              <figcaption>使用酷狗音乐 App 扫码；此页面不会自动重新申请二维码。</figcaption>
+            </figure>
+          </article>
+        </div>
+      </section>
+
+      <section id="main-panel-files" class="panel main-panel" role="tabpanel" aria-labelledby="main-tab-files" data-main-panel="files" tabindex="0" hidden>
+        <section class="subsection" aria-labelledby="download-title">
+          <div class="section-heading">
+            <h2 id="download-title">在线搜索与下载</h2>
+            <p>先查看歌曲候选信息，再选择一首下载。</p>
+          </div>
+          <form id="search-form" class="form-grid">
+            <label class="field">
+              <span>音乐平台</span>
+              <select id="search-platform" name="platform">
+                <option value="netease">网易云音乐</option>
+                <option value="qq">QQ音乐</option>
+                <option value="kugou">酷狗音乐</option>
+              </select>
+            </label>
+            <label class="field query-field">
+              <span>歌曲名、歌手或分享链接</span>
+              <input id="search-query" name="query" type="text" maxlength="1000" autocomplete="off" placeholder="输入关键词或分享链接" required />
+            </label>
+            <button class="button primary form-submit" id="search-submit" type="submit">搜索歌曲</button>
+          </form>
+          <p class="helper-text">聊天点歌：使用机器人当前唤醒词加“搜索 歌名”查找歌曲，再按提示继续播放。</p>
+          <p class="inline-status" id="download-status" role="status" aria-live="polite"></p>
+          <div class="search-results" id="search-results" aria-live="polite"></div>
+        </section>
+
+        <section class="subsection" aria-labelledby="downloaded-files-title">
+          <div class="section-heading">
+            <h2 id="downloaded-files-title">已下载文件</h2>
+            <p>按平台查看下载记录，可按歌名或歌手筛选。</p>
+          </div>
+          <form id="file-filter-form" class="file-filter-form">
+            <label class="field">
+              <span>音乐平台</span>
+              <select id="file-platform" name="platform">
+                <option value="netease">网易云音乐</option>
+                <option value="qq">QQ音乐</option>
+                <option value="kugou">酷狗音乐</option>
+              </select>
+            </label>
+            <label class="field file-query-field">
+              <span>歌曲或歌手</span>
+              <input id="file-query" name="query" type="search" maxlength="1000" autocomplete="off" placeholder="在所选平台中筛选" />
+            </label>
+            <button class="button quiet form-submit" id="refresh-files" type="submit">筛选文件</button>
+          </form>
+          <div class="file-groups" id="file-groups" aria-live="polite"></div>
+        </section>
+      </section>
+
+      <section id="main-panel-text-settings" class="panel main-panel" role="tabpanel" aria-labelledby="main-tab-text-settings" data-main-panel="text-settings" tabindex="0" hidden>
+        <div class="section-heading">
+          <div>
+            <h2>文本设置</h2>
+            <p>按消息类型编辑聊天回复文本；变量需保留花括号。</p>
+          </div>
+        </div>
+        <form id="text-settings-form" class="settings-form">
+          <section class="setting-group" aria-labelledby="reply-templates-title">
+            <div class="setting-group-heading">
+              <div>
+                <h3 id="reply-templates-title">回复模板</h3>
+                <p class="helper-text">选择分类后只显示该类文本。三条播放提示可分别关闭发送。</p>
+              </div>
+            </div>
+            <div id="template-category-tabs" class="provider-tabs template-category-tabs" role="tablist" aria-label="回复模板分类">
+              <button id="template-category-menu" class="tab-button" type="button" role="tab" aria-controls="reply-template-fields" aria-selected="true" tabindex="0" data-template-category="menu">点歌菜单</button>
+              <button id="template-category-search" class="tab-button" type="button" role="tab" aria-controls="reply-template-fields" aria-selected="false" tabindex="-1" data-template-category="search">搜索结果</button>
+              <button id="template-category-playback" class="tab-button" type="button" role="tab" aria-controls="reply-template-fields" aria-selected="false" tabindex="-1" data-template-category="playback">播放反馈</button>
+              <button id="template-category-errors" class="tab-button" type="button" role="tab" aria-controls="reply-template-fields" aria-selected="false" tabindex="-1" data-template-category="errors">异常提示</button>
+              <button id="template-category-log" class="tab-button" type="button" role="tab" aria-controls="reply-template-fields" aria-selected="false" tabindex="-1" data-template-category="log">点歌日志</button>
+            </div>
+            <div id="reply-template-fields" class="reply-template-fields" role="tabpanel" aria-labelledby="template-category-menu" aria-live="polite"></div>
+          </section>
+          <button class="button primary form-submit" id="save-text-settings" type="submit">保存文本设置</button>
+        </form>
+        <p class="inline-status" id="text-settings-status" role="status" aria-live="polite"></p>
+      </section>
+
+      <section id="main-panel-settings" class="panel main-panel" role="tabpanel" aria-labelledby="main-tab-settings" data-main-panel="settings" tabindex="0" hidden>
+        <div class="section-heading">
+          <div>
+            <h2>插件设置</h2>
+            <p>配置聊天点歌、AI 翻唱和音频文件管理。</p>
+          </div>
+        </div>
+        <form id="settings-form" class="settings-form">
+          <section class="setting-group" aria-labelledby="passive-llm-title">
+            <h3 id="passive-llm-title">被动 LLM</h3>
+            <label class="setting-toggle" for="passive-llm">
+              <input id="passive-llm" name="passive_llm" type="checkbox" aria-describedby="passive-llm-description" />
+              <span>启用被动 LLM 记录</span>
+            </label>
+            <p id="passive-llm-description" class="helper-text">开启后记录当前对话的点歌时间、顺序和发送结果，向下次正常 AI 对话提供最近 10 条记录；不额外调用模型。仅当前对话，不保证精确原消息位置。</p>
+            <div class="playback-fields" aria-label="被动点歌播放限制">
+              <label class="field" for="passive-max-seconds">
+                <span>最长播放时间（秒；0 为不限）</span>
+                <input id="passive-max-seconds" name="passive_playback.max_seconds" type="number" min="0" step="1" value="0" required />
+              </label>
+              <label class="field" for="passive-gap-seconds">
+                <span>分段发送间隔（秒；0 为连续发送）</span>
+                <input id="passive-gap-seconds" name="passive_playback.gap_seconds" type="number" min="0" step="any" value="0" required />
+              </label>
+            </div>
+            <p class="helper-text">这些限制只应用于被动聊天点歌；网页上的手动发送不受影响。</p>
+          </section>
+
+          <section class="setting-group" aria-labelledby="active-llm-title">
+            <h3 id="active-llm-title">主动 LLM</h3>
+            <label class="setting-toggle" for="active-llm">
+              <input id="active-llm" name="active_llm" type="checkbox" aria-describedby="active-llm-description" />
+              <span>启用主动 LLM</span>
+            </label>
+            <p id="active-llm-description" class="helper-text">开启后，正常 AI 对话可自主判断是否点歌，并使用所选音色翻唱；需要支持 tool calling 的模型，且人格设定允许。现有唤醒词指令会暂停处理。</p>
+            <div class="playback-fields active-playback-fields" aria-label="主动翻唱设置">
+              <label class="field" for="active-voice-id">
+                <span>翻唱音色</span>
+                <select id="active-voice-id" name="active_playback.voice_id">
+                  <option value="">选择音色</option>
+                </select>
+              </label>
+              <label class="field" for="active-max-seconds">
+                <span>最长演唱时间（秒；0 为不限）</span>
+                <input id="active-max-seconds" name="active_playback.max_seconds" type="number" min="0" step="1" value="60" required />
+              </label>
+              <label class="field" for="active-gap-seconds">
+                <span>分段发送间隔（秒；0 为连续发送）</span>
+                <input id="active-gap-seconds" name="active_playback.gap_seconds" type="number" min="0" step="any" value="0" required />
+              </label>
+            </div>
+            <p class="helper-text">时长和间隔只用于主动 LLM 触发的翻唱。导入音色后可在此选择并保存。</p>
+          </section>
+
+          <section class="setting-group" aria-labelledby="cover-service-title">
+            <h3 id="cover-service-title">翻唱服务与音色</h3>
+            <p class="helper-text">同机或异机部署均填写服务 URL 和访问密钥；插件本机无需安装 RVC 重依赖。导入音色时上传模型文件，不填写远端文件路径。</p>
+            <div class="cover-service-fields">
+              <label class="field" for="cover-service-url">
+                <span>翻唱服务 URL</span>
+                <input id="cover-service-url" name="cover_service.url" type="url" inputmode="url" autocomplete="url" placeholder="http://127.0.0.1:17866" />
+              </label>
+              <label class="field" for="cover-service-token">
+                <span>访问密钥</span>
+                <input id="cover-service-token" name="cover_service.token" type="password" autocomplete="new-password" placeholder="留空保留已保存密钥" />
+              </label>
+            </div>
+            <div class="cover-service-actions">
+              <label class="setting-toggle cover-token-clear" for="cover-service-clear-token">
+                <input id="cover-service-clear-token" name="cover_service.clear_token" type="checkbox" disabled />
+                <span>清除已保存密钥</span>
+              </label>
+            </div>
+            <p class="helper-text" id="cover-token-status">尚未保存访问密钥。</p>
+
+            <div class="cover-import-section">
+              <h4>导入 RVC 音色</h4>
+              <div class="cover-import-fields" data-transient>
+                <label class="field" for="cover-voice-name">
+                  <span>音色名称</span>
+                  <input id="cover-voice-name" type="text" maxlength="80" autocomplete="off" placeholder="例如：我的翻唱音色" />
+                </label>
+                <label class="field" for="cover-model-file">
+                  <span>模型文件（.pt / .pth）</span>
+                  <input id="cover-model-file" type="file" accept=".pt,.pth,application/octet-stream" />
+                </label>
+                <label class="field" for="cover-index-file">
+                  <span>索引文件（可选 .index）</span>
+                  <input id="cover-index-file" type="file" accept=".index,application/octet-stream" />
+                </label>
+              </div>
+              <div class="cover-service-actions">
+                <button class="button primary small" id="cover-import" type="button">上传并导入音色</button>
+              </div>
+              <p class="helper-text">索引文件可选；导入完成后可在主动 LLM 中选择音色。</p>
+              <p class="inline-status" id="cover-import-status" role="status" aria-live="polite"></p>
+            </div>
+          </section>
+
+          <section class="setting-group" aria-labelledby="song-log-title">
+            <h3 id="song-log-title">点歌日志</h3>
+            <label class="setting-toggle" for="song-log-enabled">
+              <input id="song-log-enabled" name="song_log.enabled" type="checkbox" aria-describedby="song-log-description" />
+              <span>启用点歌任务结束日志</span>
+            </label>
+            <p id="song-log-description" class="helper-text">每个播放任务结束后向指定会话发送一条结果；覆盖成功、部分发送和失败，不记录搜索、下载或环境测试。</p>
+            <div class="playback-fields song-log-fields" aria-label="点歌日志发送目标">
+              <label class="field" for="song-log-platform">
+                <span>平台实例</span>
+                <select id="song-log-platform" name="song_log.platform_id"></select>
+              </label>
+              <label class="field" for="song-log-target-type">
+                <span>会话类型</span>
+                <select id="song-log-target-type" name="song_log.target_type">
+                  <option value="private">私聊</option>
+                  <option value="group">群聊</option>
+                </select>
+              </label>
+              <label class="field" for="song-log-target-id">
+                <span id="song-log-target-id-label">私聊 ID</span>
+                <input id="song-log-target-id" name="song_log.target_id" type="text" maxlength="128" autocomplete="off" placeholder="输入接收方 ID" />
+              </label>
+            </div>
+          </section>
+
+          <section class="setting-group" aria-labelledby="song-limit-title">
+            <h3 id="song-limit-title">歌曲文件数量</h3>
+            <label class="field max-songs-field" for="max-songs">
+              <span>歌曲总数上限</span>
+              <input id="max-songs" name="max_songs" type="number" min="1" step="1" value="30" required />
+            </label>
+            <p class="helper-text">默认保留 30 首歌曲。降低上限并保存后，会优先清理最早下载的歌曲及其文件。</p>
+          </section>
+          <button class="button primary form-submit" id="save-settings" type="submit">保存设置</button>
+        </form>
+        <p class="inline-status" id="settings-status" role="status" aria-live="polite"></p>
+      </section>
+
+      <footer class="compatibility-note">
+        本插件目前明确兼容 SnowLuma，其他机器人协议端或平台请自行尝试。
+      </footer>
+    </main>
+  </body>
+</html>

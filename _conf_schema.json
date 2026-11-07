@@ -1,0 +1,8 @@
+{
+  "management": {
+    "description": "本插件因逻辑较为复杂请前往侧边栏“更好的点歌”图形化管理页面进行设置",
+    "type": "object",
+    "default": {},
+    "items": {}
+  }
+}
