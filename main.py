@@ -44,7 +44,7 @@ CHAT_NAMES["qq"] = "QQ音乐"
     PLUGIN_NAME,
     "Xing",
     "更好的点歌：支持网易云音乐、QQ音乐和酷狗，并提供登录与文件管理页面。",
-    "1.1.0",
+    "1.1.1",
 )
 class BetterMusicPlugin(Star):
     """Search provider catalogs and send only an explicitly selected track."""

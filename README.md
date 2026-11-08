@@ -2,7 +2,7 @@
 
 **AstrBot 的 QQ 点歌插件**，可搜索并分段发送网易云音乐、酷狗音乐和 QQ 音乐的歌曲。可选接入外部兼容 HTTP 服务，为歌曲生成翻唱语音。普通点歌无需配置推理服务，也不要求额外调用 LLM。
 
-- 版本：1.1.0
+- 版本：1.1.1（修复设置页无法保存“边生成边发送”开关的问题。）
 - [源码仓库](https://github.com/Nortea575/astrbot_plugin_better_music)
 - [翻唱服务接入与接口说明](cover_deployment.md)
 

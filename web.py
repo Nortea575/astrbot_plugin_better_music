@@ -511,7 +511,7 @@ class WebAPI:
             values["reply_enabled"] = dict(enabled)
         nested_fields = {
             "passive_playback": {"max_seconds", "gap_seconds"},
-            "active_playback": {"voice_id", "max_seconds", "gap_seconds"},
+            "active_playback": {"voice_id", "max_seconds", "gap_seconds", "incremental_output"},
             "cover_service": {"url", "token"},
         }
         for field, allowed_keys in nested_fields.items():
@@ -549,6 +549,10 @@ class WebAPI:
                     if not isinstance(value, str) or len(value.strip()) > 200:
                         return error_response("active_playback.voice_id 必须是不超过200字符的字符串", status_code=400)
                     normalized_section[key] = value.strip()
+                elif key == "incremental_output":
+                    if type(value) is not bool:
+                        return error_response("active_playback.incremental_output 必须是布尔值", status_code=400)
+                    normalized_section[key] = value
                 elif key == "url":
                     if not isinstance(value, str) or not self._valid_custom_url(value, allow_empty=True):
                         return error_response("cover_service.url 必须是有效的 HTTP 或 HTTPS URL", status_code=400)
